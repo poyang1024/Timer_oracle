@@ -5,29 +5,57 @@
 ### 時序圖
 ```mermaid
 sequenceDiagram
-Buyer->>AssetChain: inceptTrade()
-AssetChain->>Oracle: TimeRequestSent
-Oracle->>AssetChain: fulfillTime()
-AssetChain->>Seller: TradeInitiated
+    participant Buyer as Buyer (買方)
+    participant AssetChain as AssetChain Contract
+    participant Oracle as Oracle Service
+    participant Seller as Seller (賣方)
 
-Seller->>AssetChain: confirmTrade()
-AssetChain->>Oracle: TimeRequestSent
-Oracle->>AssetChain: fulfillTime()
-AssetChain->>Buyer: TradeConfirmed
+    Note over Buyer,Seller: 交易初始階段
+    Buyer->>AssetChain: inceptTrade()
+    Note right of Buyer: 買方發起交易:<br/>1. 設定交易ID、金額、賣方地址<br/>2. 設定加密後的密鑰<br/>3. 設定交易有效期限
 
-Buyer->>AssetChain: transferWithKey()
-alt Key is correct
-    AssetChain->>Buyer: TradeCompleted (transfer funds)
-else Key is incorrect
-    AssetChain->>Seller: TradeFailed (return funds)
-end
+    AssetChain->>Oracle: TimeRequestSent
+    Note right of AssetChain: 合約發出時間請求事件:<br/>1. 生成唯一requestId<br/>2. 記錄交易初始狀態
 
-loop Every 30 seconds
-    Oracle->>AssetChain: checkAndHandleExpiredTrades()
-    alt Trade expired
+    Oracle->>AssetChain: fulfillTime()
+    Note right of Oracle: Oracle回應時間請求:<br/>1. 提供當前時間戳<br/>2. 設定交易inception時間<br/>3. 將狀態改為AwaitingConfirmation
+
+    AssetChain->>Seller: TradeInitiated
+    Note right of AssetChain: 通知賣方交易已初始化:<br/>1. 等待賣方確認<br/>2. 開始計算時效
+
+    Note over Buyer,Seller: 交易確認階段
+    Seller->>AssetChain: confirmTrade()
+    Note right of Seller: 賣方確認交易:<br/>1. 存入相應金額<br/>2. 提供加密後的買方密鑰<br/>3. 檢查交易參數
+
+    AssetChain->>Oracle: TimeRequestSent
+    Note right of AssetChain: 再次請求時間確認:<br/>1. 檢查是否在有效期內<br/>2. 更新交易狀態
+
+    Oracle->>AssetChain: fulfillTime()
+    Note right of Oracle: Oracle確認時間:<br/>1. 提供確認時間戳<br/>2. 檢查是否在有效期內<br/>3. 設定confirmationTime
+
+    AssetChain->>Buyer: TradeConfirmed
+    Note right of AssetChain: 通知買方交易已確認:<br/>1. 等待買方提供密鑰<br/>2. 繼續監控時效
+
+    Note over Buyer,Seller: 交易完成/失敗階段
+    Buyer->>AssetChain: transferWithKey()
+    Note right of Buyer: 買方提供密鑰:<br/>1. 驗證密鑰正確性<br/>2. 檢查是否在有效期內
+
+    alt Key is correct
+        AssetChain->>Buyer: TradeCompleted (transfer funds)
+        Note right of AssetChain: 交易成功完成:<br/>1. 轉移資金給買方<br/>2. 更新狀態為Completed
+    else Key is incorrect
         AssetChain->>Seller: TradeFailed (return funds)
+        Note right of AssetChain: 交易失敗:<br/>1. 退還資金給賣方<br/>2. 更新狀態為Failed
     end
-end
+
+    loop Every 30 seconds
+        Oracle->>AssetChain: checkAndHandleExpiredTrades()
+        Note right of Oracle: 定期檢查過期交易:<br/>1. 檢查時效是否超過<br/>2. 處理過期交易
+        alt Trade expired
+            AssetChain->>Seller: TradeFailed (return funds)
+            Note right of AssetChain: 處理過期交易:<br/>1. 自動退還資金給賣方<br/>2. 更新狀態為Failed
+        end
+    end
 ```
 
 ### 合約結構
