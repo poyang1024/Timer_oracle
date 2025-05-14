@@ -1,5 +1,6 @@
 const ethers = require('ethers');
 const express = require('express');
+const logger = require('./services/logger');
 require('dotenv').config();
 
 const app = express();
@@ -20,16 +21,9 @@ let provider, signer, contract;
 let lastProcessedBlock = 0;
 let currentNonce = 0;
 
-// Store trade information and processing status
 const trades = new Map();
-// Queue for pending events
 const eventQueue = [];
-// Set of trade IDs currently being processed
 const processingTrades = new Set();
-
-function log(message) {
-    console.log(`${new Date().toISOString()} - ${message}`);
-}
 
 async function initializeEthers() {
     provider = new ethers.JsonRpcProvider(ETHEREUM_NODE_URL);
@@ -37,12 +31,20 @@ async function initializeEthers() {
     contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, signer);
     lastProcessedBlock = await provider.getBlockNumber();
     currentNonce = await provider.getTransactionCount(signer.address);
-    log(`Initialized with contract: ${CONTRACT_ADDRESS}`);
+    logger('info', `Initialized contract`, { 
+        contract: CONTRACT_ADDRESS,
+        startBlock: lastProcessedBlock
+    });
 }
 
 async function handleTimeRequest(requestId, tradeId, duration, eventTimestamp) {
     if (processingTrades.has(tradeId)) {
-        log(`Trade ${tradeId} is currently being processed, queueing this request`);
+        logger('info', `Trade queued for processing`, {
+            tradeId,
+            requestId,
+            duration: duration.toString(),
+            eventTimestamp
+        });
         eventQueue.push({ requestId, tradeId, duration, eventTimestamp });
         return;
     }
@@ -53,7 +55,6 @@ async function handleTimeRequest(requestId, tradeId, duration, eventTimestamp) {
         const currentTime = Math.floor(Date.now() / 1000);
         
         if (!trades.has(tradeId)) {
-            // First time seeing this trade
             trades.set(tradeId, { 
                 inceptionTime: eventTimestamp, 
                 duration: Number(duration),
@@ -61,24 +62,39 @@ async function handleTimeRequest(requestId, tradeId, duration, eventTimestamp) {
                 lastRequestTime: eventTimestamp
             });
             await fulfillTime(requestId, eventTimestamp);
-            log(`Inception time set for trade ${tradeId}`);
+            logger('info', `Inception time set`, {
+                tradeId,
+                inceptionTime: eventTimestamp,
+                duration: duration.toString()
+            });
         } else {
             const trade = trades.get(tradeId);
             if (currentTime - trade.inceptionTime <= trade.duration) {
-                // Confirmation within duration
                 trade.lastRequestId = requestId;
                 trade.lastRequestTime = eventTimestamp;
                 await fulfillTime(requestId, eventTimestamp);
-                log(`Confirmation time set for trade ${tradeId}`);
+                logger('info', `Confirmation time set`, {
+                    tradeId,
+                    requestId,
+                    duration: trade.duration.toString(),
+                    timeElapsed: (currentTime - trade.inceptionTime).toString()
+                });
             } else {
-                // Exceeded duration
                 await handleFailedConfirmation(tradeId);
-                log(`Failed confirmation for trade ${tradeId} due to exceeded duration`);
+                logger('warn', `Failed confirmation due to exceeded duration`, {
+                    tradeId,
+                    duration: trade.duration.toString(),
+                    timeElapsed: (currentTime - trade.inceptionTime).toString()
+                });
                 trades.delete(tradeId);
             }
         }
     } catch (error) {
-        log(`Error processing trade ${tradeId}: ${error.message}`);
+        logger('error', `Error processing trade`, {
+            tradeId,
+            duration: duration.toString(),
+            error: error.message
+        });
     } finally {
         processingTrades.delete(tradeId);
         processNextEvent();
@@ -89,15 +105,19 @@ async function fulfillTime(requestId, timestamp) {
     try {
         const tx = await contract.fulfillTime(requestId, timestamp, {
             nonce: currentNonce++,
-            gasLimit: 200000 // Adjust as needed
+            gasLimit: 200000
         });
         await tx.wait();
-        log(`Fulfilled time for request ${requestId}`);
+        logger('info', `Time fulfilled`, {
+            requestId,
+            timestamp
+        });
     } catch (error) {
         if (error.message.includes('nonce too low')) {
             currentNonce = await provider.getTransactionCount(signer.address);
-            log(`Nonce reset to ${currentNonce}`);
-            // Retry the transaction
+            logger('warn', `Nonce reset`, {
+                newNonce: currentNonce
+            });
             return fulfillTime(requestId, timestamp);
         }
         throw error;
@@ -108,15 +128,18 @@ async function handleFailedConfirmation(tradeId) {
     try {
         const tx = await contract.handleFailedConfirmation(tradeId, {
             nonce: currentNonce++,
-            gasLimit: 200000 // Adjust as needed
+            gasLimit: 200000
         });
         await tx.wait();
-        log(`Handled failed confirmation for trade ${tradeId}`);
+        logger('info', `Failed confirmation handled`, {
+            tradeId
+        });
     } catch (error) {
         if (error.message.includes('nonce too low')) {
             currentNonce = await provider.getTransactionCount(signer.address);
-            log(`Nonce reset to ${currentNonce}`);
-            // Retry the transaction
+            logger('warn', `Nonce reset`, {
+                newNonce: currentNonce
+            });
             return handleFailedConfirmation(tradeId);
         }
         throw error;
@@ -127,7 +150,10 @@ function processNextEvent() {
     if (eventQueue.length > 0) {
         const nextEvent = eventQueue.shift();
         handleTimeRequest(nextEvent.requestId, nextEvent.tradeId, nextEvent.duration, nextEvent.eventTimestamp)
-            .catch(error => log(`Error processing queued event: ${error.message}`));
+            .catch(error => logger('error', `Error processing queued event`, {
+                error: error.message,
+                duration: nextEvent.duration.toString()
+            }));
     }
 }
 
@@ -138,10 +164,18 @@ async function checkAndHandleExpiredTrades() {
             processingTrades.add(tradeId);
             try {
                 await handleFailedConfirmation(tradeId);
-                log(`Handled expired trade ${tradeId}`);
+                logger('info', `Expired trade handled`, {
+                    tradeId,
+                    duration: trade.duration.toString(),
+                    timeElapsed: (currentTime - trade.inceptionTime).toString()
+                });
                 trades.delete(tradeId);
             } catch (error) {
-                log(`Error handling expired trade ${tradeId}: ${error.message}`);
+                logger('error', `Error handling expired trade`, {
+                    tradeId,
+                    duration: trade.duration.toString(),
+                    error: error.message
+                });
             } finally {
                 processingTrades.delete(tradeId);
             }
@@ -153,10 +187,13 @@ async function pollEvents() {
     try {
         const latestBlock = await provider.getBlockNumber();
         if (latestBlock <= lastProcessedBlock) {
-            return; // No new blocks
+            return;
         }
 
-        log(`Checking for events from block ${lastProcessedBlock + 1} to ${latestBlock}`);
+        logger('debug', `Checking for new events`, {
+            fromBlock: lastProcessedBlock + 1,
+            toBlock: latestBlock
+        });
 
         const filter = contract.filters.TimeRequestSent();
         const events = await contract.queryFilter(filter, lastProcessedBlock + 1, latestBlock);
@@ -164,26 +201,38 @@ async function pollEvents() {
         for (const event of events) {
             const { requestId, tradeId, duration } = event.args;
             const eventTimestamp = (await event.getBlock()).timestamp;
-            log(`Received TimeRequestSent event for trade ${tradeId}`);
+            
+            logger('info', `TimeRequestSent event received`, {
+                tradeId: tradeId.toString(),
+                requestId,
+                duration: duration.toString(),
+                eventTimestamp
+            });
+
             if (!processingTrades.has(tradeId.toString())) {
                 handleTimeRequest(requestId, tradeId.toString(), duration, eventTimestamp)
-                    .catch(error => log(`Error processing event: ${error.message}`));
+                    .catch(error => logger('error', `Error processing event`, {
+                        error: error.message,
+                        duration: duration.toString()
+                    }));
             } else {
                 eventQueue.push({ requestId, tradeId: tradeId.toString(), duration, eventTimestamp });
-                log(`Trade ${tradeId} is being processed, event queued`);
+                logger('info', `Event queued - trade in process`, {
+                    tradeId: tradeId.toString(),
+                    duration: duration.toString()
+                });
             }
         }
 
         lastProcessedBlock = latestBlock;
     } catch (error) {
-        log(`Error polling events: ${error.message}`);
+        logger('error', `Error polling events`, {
+            error: error.message
+        });
     }
 }
 
-// Poll for events every 15 seconds
 setInterval(pollEvents, 15000);
-
-// Check for expired trades every 30 seconds
 setInterval(checkAndHandleExpiredTrades, 30000);
 
 const PORT = process.env.PORT || 1202;
@@ -192,8 +241,12 @@ async function startServer() {
     await initializeEthers();
     
     app.listen(PORT, () => {
-        log(`Server running on port ${PORT}`);
+        logger('info', `Server started`, {
+            port: PORT
+        });
     });
 }
 
-startServer().catch(error => log(`Unhandled error during server start: ${error.message}`));
+startServer().catch(error => logger('error', `Server start failed`, {
+    error: error.message
+}));
