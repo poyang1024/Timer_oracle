@@ -281,7 +281,8 @@ async function testNormalTradeFlow() {
         } = providers;
 
         // 生成唯一交易ID
-        const TRADE_ID = Math.floor(Date.now() / 1000);
+        const nonce = Math.floor(Math.random() * 1000);
+        const TRADE_ID = Math.floor(Date.now() / 1000) + nonce;
         const PAYMENT_ID = TRADE_ID;
         const AMOUNT = ethers.parseEther("0.005");
         const DURATION = 3600; // 1小時
