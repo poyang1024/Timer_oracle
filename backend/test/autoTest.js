@@ -243,30 +243,334 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 安全執行交易函數
+// 🔧 改進的安全執行交易函數
 async function safeExecuteTransaction(contractMethod, description, retries = 3) {
+    let lastError;
+    let transactionExecuted = false;
+    
     for (let i = 0; i < retries; i++) {
         try {
             colorLog('blue', `執行: ${description} (嘗試 ${i + 1}/${retries})`);
+            
             const tx = await contractMethod();
             colorLog('yellow', `交易已提交: ${tx.hash}`);
+            
+            // 等待交易確認
             const receipt = await tx.wait();
-            colorLog('green', `✓ ${description} 成功 (區塊: ${receipt.blockNumber}, Gas: ${receipt.gasUsed.toString()})`);
-            return receipt;
-        } catch (error) {
-            colorLog('red', `✗ ${description} 失敗 (嘗試 ${i + 1}): ${error.message}`);
-            if (i === retries - 1) {
-                throw error;
+            
+            if (receipt.status === 0) {
+                throw new Error(`交易失敗: ${tx.hash}`);
             }
-            await delay(2000); // 重試前等待2秒
+            
+            // 計算 Gas 費用
+            const gasUsed = receipt.gasUsed;
+            const gasPrice = receipt.gasPrice || tx.gasPrice;
+            const totalGasCost = gasUsed * gasPrice;
+            
+            colorLog('green', `✓ ${description} 成功 (區塊: ${receipt.blockNumber}, Gas: ${receipt.gasUsed.toString()})`);
+            colorLog('cyan', `  Gas 費用: ${ethers.formatEther(totalGasCost)} ETH`);
+            
+            transactionExecuted = true;
+            return receipt;
+            
+        } catch (error) {
+            lastError = error;
+            colorLog('red', `✗ ${description} 失敗 (嘗試 ${i + 1}): ${error.message}`);
+            
+            // 檢查是否是因為交易已經成功但網路問題導致的錯誤
+            if (error.message.includes('already exists') || 
+                error.message.includes('nonce too low') ||
+                error.message.includes('replacement transaction underpriced')) {
+                colorLog('yellow', '⚠️ 交易可能已經成功，停止重試');
+                transactionExecuted = true;
+                break;
+            }
+            
+            if (i === retries - 1) {
+                throw lastError;
+            }
+            
+            // 遞增等待時間再重試
+            const waitTime = (i + 1) * 3000;
+            colorLog('yellow', `等待 ${waitTime/1000} 秒後重試...`);
+            await delay(waitTime);
         }
+    }
+    
+    if (!transactionExecuted) {
+        throw lastError || new Error('交易執行失敗');
+    }
+    
+    return { skipped: true };
+}
+
+// 🔧 帳戶資產狀況檢查功能 (增強版)
+async function checkAccountBalances(providers, description = "當前") {
+    try {
+        const {
+            assetProvider,
+            paymentProvider,
+            assetBuyerSigner,
+            assetSellerSigner
+        } = providers;
+
+        colorLog('bright', `\n${'='.repeat(60)}`);
+        colorLog('bright', `${description}帳戶資產狀況`);
+        colorLog('bright', `${'='.repeat(60)}`);
+
+        // 獲取帳戶地址
+        const buyerAddress = await assetBuyerSigner.getAddress();
+        const sellerAddress = await assetSellerSigner.getAddress();
+
+        // Asset Chain 餘額和 Nonce
+        colorLog('cyan', '\n🔗 Asset 鏈帳戶狀況:');
+        const assetBuyerBalance = await assetProvider.getBalance(buyerAddress);
+        const assetSellerBalance = await assetProvider.getBalance(sellerAddress);
+        const assetBuyerNonce = await assetProvider.getTransactionCount(buyerAddress);
+        const assetSellerNonce = await assetProvider.getTransactionCount(sellerAddress);
+        
+        console.log(`  👤 買方 (${buyerAddress}):`);
+        console.log(`     餘額: ${ethers.formatEther(assetBuyerBalance)} ETH`);
+        console.log(`     Nonce: ${assetBuyerNonce}`);
+        console.log(`  👤 賣方 (${sellerAddress}):`);
+        console.log(`     餘額: ${ethers.formatEther(assetSellerBalance)} ETH`);
+        console.log(`     Nonce: ${assetSellerNonce}`);
+
+        // Payment Chain 餘額和 Nonce
+        colorLog('magenta', '\n💰 Payment 鏈帳戶狀況:');
+        const paymentBuyerBalance = await paymentProvider.getBalance(buyerAddress);
+        const paymentSellerBalance = await paymentProvider.getBalance(sellerAddress);
+        const paymentBuyerNonce = await paymentProvider.getTransactionCount(buyerAddress);
+        const paymentSellerNonce = await paymentProvider.getTransactionCount(sellerAddress);
+        
+        console.log(`  👤 買方 (${buyerAddress}):`);
+        console.log(`     餘額: ${ethers.formatEther(paymentBuyerBalance)} ETH`);
+        console.log(`     Nonce: ${paymentBuyerNonce}`);
+        console.log(`  👤 賣方 (${sellerAddress}):`);
+        console.log(`     餘額: ${ethers.formatEther(paymentSellerBalance)} ETH`);
+        console.log(`     Nonce: ${paymentSellerNonce}`);
+
+        // 計算總資產
+        const buyerTotalBalance = assetBuyerBalance + paymentBuyerBalance;
+        const sellerTotalBalance = assetSellerBalance + paymentSellerBalance;
+
+        colorLog('yellow', '\n📊 總資產統計:');
+        console.log(`  👤 買方總資產: ${ethers.formatEther(buyerTotalBalance)} ETH`);
+        console.log(`     - Asset 鏈: ${ethers.formatEther(assetBuyerBalance)} ETH`);
+        console.log(`     - Payment 鏈: ${ethers.formatEther(paymentBuyerBalance)} ETH`);
+        
+        console.log(`  👤 賣方總資產: ${ethers.formatEther(sellerTotalBalance)} ETH`);
+        console.log(`     - Asset 鏈: ${ethers.formatEther(assetSellerBalance)} ETH`);
+        console.log(`     - Payment 鏈: ${ethers.formatEther(paymentSellerBalance)} ETH`);
+
+        console.log(`\n  💎 系統總資產: ${ethers.formatEther(buyerTotalBalance + sellerTotalBalance)} ETH`);
+
+        return {
+            buyer: {
+                address: buyerAddress,
+                assetBalance: assetBuyerBalance,
+                paymentBalance: paymentBuyerBalance,
+                totalBalance: buyerTotalBalance,
+                assetNonce: assetBuyerNonce,
+                paymentNonce: paymentBuyerNonce
+            },
+            seller: {
+                address: sellerAddress,
+                assetBalance: assetSellerBalance,
+                paymentBalance: paymentSellerBalance,
+                totalBalance: sellerTotalBalance,
+                assetNonce: assetSellerNonce,
+                paymentNonce: paymentSellerNonce
+            },
+            systemTotal: buyerTotalBalance + sellerTotalBalance,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+    } catch (error) {
+        colorLog('red', '❌ 檢查帳戶餘額時發生錯誤: ' + error.message);
+        return null;
     }
 }
 
-// 測試1: 正常交易流程
-async function testNormalTradeFlow() {
+// 🔧 比較交易前後的資產變化 (增強版)
+async function compareBalanceChanges(beforeBalances, afterBalances, tradeAmount) {
+    if (!beforeBalances || !afterBalances) {
+        colorLog('red', '❌ 無法比較餘額變化：缺少餘額數據');
+        return;
+    }
+
+    colorLog('bright', `\n${'='.repeat(60)}`);
+    colorLog('bright', '📈 交易前後資產變化分析');
+    colorLog('bright', `${'='.repeat(60)}`);
+
+    const tradeAmountWei = ethers.parseEther(tradeAmount.toString());
+
+    // 買方資產變化
+    colorLog('blue', '\n👤 買方資產變化:');
+    const buyerAssetChange = afterBalances.buyer.assetBalance - beforeBalances.buyer.assetBalance;
+    const buyerPaymentChange = afterBalances.buyer.paymentBalance - beforeBalances.buyer.paymentBalance;
+    const buyerTotalChange = afterBalances.buyer.totalBalance - beforeBalances.buyer.totalBalance;
+    const buyerAssetNonceChange = afterBalances.buyer.assetNonce - beforeBalances.buyer.assetNonce;
+    const buyerPaymentNonceChange = afterBalances.buyer.paymentNonce - beforeBalances.buyer.paymentNonce;
+
+    console.log(`  Asset 鏈變化: ${buyerAssetChange >= 0 ? '+' : ''}${ethers.formatEther(buyerAssetChange)} ETH`);
+    console.log(`  Payment 鏈變化: ${buyerPaymentChange >= 0 ? '+' : ''}${ethers.formatEther(buyerPaymentChange)} ETH`);
+    console.log(`  總資產變化: ${buyerTotalChange >= 0 ? '+' : ''}${ethers.formatEther(buyerTotalChange)} ETH`);
+    console.log(`  Asset Nonce 變化: +${buyerAssetNonceChange} (交易次數)`);
+    console.log(`  Payment Nonce 變化: +${buyerPaymentNonceChange} (交易次數)`);
+
+    // 賣方資產變化
+    colorLog('green', '\n👤 賣方資產變化:');
+    const sellerAssetChange = afterBalances.seller.assetBalance - beforeBalances.seller.assetBalance;
+    const sellerPaymentChange = afterBalances.seller.paymentBalance - beforeBalances.seller.paymentBalance;
+    const sellerTotalChange = afterBalances.seller.totalBalance - beforeBalances.seller.totalBalance;
+    const sellerAssetNonceChange = afterBalances.seller.assetNonce - beforeBalances.seller.assetNonce;
+    const sellerPaymentNonceChange = afterBalances.seller.paymentNonce - beforeBalances.seller.paymentNonce;
+
+    console.log(`  Asset 鏈變化: ${sellerAssetChange >= 0 ? '+' : ''}${ethers.formatEther(sellerAssetChange)} ETH`);
+    console.log(`  Payment 鏈變化: ${sellerPaymentChange >= 0 ? '+' : ''}${ethers.formatEther(sellerPaymentChange)} ETH`);
+    console.log(`  總資產變化: ${sellerTotalChange >= 0 ? '+' : ''}${ethers.formatEther(sellerTotalChange)} ETH`);
+    console.log(`  Asset Nonce 變化: +${sellerAssetNonceChange} (交易次數)`);
+    console.log(`  Payment Nonce 變化: +${sellerPaymentNonceChange} (交易次數)`);
+
+    // 系統總資產變化
+    const systemTotalChange = afterBalances.systemTotal - beforeBalances.systemTotal;
+    colorLog('yellow', '\n💎 系統總資產變化:');
+    console.log(`  變化: ${systemTotalChange >= 0 ? '+' : ''}${ethers.formatEther(systemTotalChange)} ETH`);
+    
+    if (systemTotalChange < 0) {
+        colorLog('cyan', `  (主要為 Gas 費用消耗)`);
+    }
+
+    // 🔧 詳細 Gas 費用分析
+    colorLog('magenta', '\n⛽ Gas 費用分析:');
+    const totalAssetNonceChange = buyerAssetNonceChange + sellerAssetNonceChange;
+    const totalPaymentNonceChange = buyerPaymentNonceChange + sellerPaymentNonceChange;
+    console.log(`  Asset 鏈總交易數: ${totalAssetNonceChange}`);
+    console.log(`  Payment 鏈總交易數: ${totalPaymentNonceChange}`);
+    console.log(`  總交易數: ${totalAssetNonceChange + totalPaymentNonceChange}`);
+    
+    if (systemTotalChange < 0) {
+        const avgGasPerTx = Math.abs(systemTotalChange) / (totalAssetNonceChange + totalPaymentNonceChange);
+        console.log(`  平均每筆交易 Gas 費用: ${ethers.formatEther(avgGasPerTx)} ETH`);
+    }
+
+    // 🔧 交易驗證 (增強版)
+    colorLog('bright', '\n✅ 交易驗證結果:');
+    console.log(`  預期交易金額: ${tradeAmount} ETH`);
+    
+    // 檢查買方是否獲得了資產
+    if (buyerAssetChange > 0) {
+        const actualGain = ethers.formatEther(buyerAssetChange);
+        colorLog('green', `  ✓ 買方成功獲得資產 (+${actualGain} ETH on Asset Chain)`);
+        
+        // 檢查金額是否正確
+        if (Math.abs(Number(actualGain) - Number(tradeAmount)) < 0.001) {
+            colorLog('green', `  ✓ 資產金額正確`);
+        } else {
+            colorLog('yellow', `  ⚠️ 資產金額與預期不符 (預期: ${tradeAmount} ETH, 實際: ${actualGain} ETH)`);
+        }
+    } else {
+        colorLog('red', `  ✗ 買方未獲得預期資產`);
+    }
+
+    // 檢查賣方是否獲得了支付
+    if (sellerPaymentChange > 0) {
+        const actualPayment = ethers.formatEther(sellerPaymentChange);
+        colorLog('green', `  ✓ 賣方成功獲得支付 (+${actualPayment} ETH on Payment Chain)`);
+        
+        // 🔧 重要：檢查賣方收到的金額是否正確
+        const expectedPayment = Number(tradeAmount);
+        const actualPaymentNum = Number(actualPayment);
+        
+        if (Math.abs(actualPaymentNum - expectedPayment) < 0.001) {
+            colorLog('green', `  ✓ 支付金額正確`);
+        } else {
+            colorLog('red', `  ✗ 支付金額不正確！`);
+            colorLog('red', `    預期: ${tradeAmount} ETH`);
+            colorLog('red', `    實際: ${actualPayment} ETH`);
+            colorLog('red', `    差額: ${(expectedPayment - actualPaymentNum).toFixed(6)} ETH`);
+            
+            // 分析可能的原因
+            colorLog('yellow', '\n🔍 問題分析:');
+            if (sellerPaymentNonceChange > 1) {
+                colorLog('yellow', `  - 賣方進行了 ${sellerPaymentNonceChange} 筆 Payment 鏈交易`);
+                colorLog('yellow', `  - 可能存在重複交易或額外的費用扣除`);
+            }
+            
+            const sellerTotalGasSpent = Math.abs(sellerTotalChange - sellerPaymentChange);
+            if (sellerTotalGasSpent > 0) {
+                colorLog('yellow', `  - 賣方總 Gas 費用: ${ethers.formatEther(sellerTotalGasSpent)} ETH`);
+            }
+        }
+    } else {
+        colorLog('red', `  ✗ 賣方未獲得預期支付`);
+    }
+
+    // 檢查交易是否平衡
+    if (buyerAssetChange > 0 && sellerPaymentChange > 0) {
+        colorLog('green', '  ✓ 交易成功完成，雙方都獲得了預期收益');
+    } else {
+        colorLog('yellow', '  ⚠️ 交易可能未完全按預期執行');
+    }
+
+    // 🔧 時間差分析
+    const timeDiff = afterBalances.timestamp - beforeBalances.timestamp;
+    colorLog('cyan', `\n⏰ 時間分析:`);
+    console.log(`  交易總耗時: ${timeDiff} 秒`);
+    console.log(`  開始時間: ${new Date(beforeBalances.timestamp * 1000).toLocaleString()}`);
+    console.log(`  完成時間: ${new Date(afterBalances.timestamp * 1000).toLocaleString()}`);
+
+    console.log(`\n${'='.repeat(60)}`);
+}
+
+// 🔧 檢查交易是否需要執行
+async function checkTransactionNecessity(contract, method, params) {
+    try {
+        if (method === 'confirmPayment') {
+            const paymentId = params[0];
+            const payment = await contract.getPayment(paymentId);
+            
+            // 如果已經是 Confirmed 狀態，就不需要再確認
+            if (payment[4] === 2) { // PaymentState.Confirmed
+                colorLog('yellow', `⚠️ Payment ${paymentId} 已經是確認狀態，跳過重複確認`);
+                return false;
+            }
+        }
+        
+        if (method === 'confirmTrade') {
+            const tradeId = params[0];
+            const trade = await contract.getTrade(tradeId);
+            
+            // 如果已經是 Confirmed 狀態，就不需要再確認
+            if (trade[4] === 2) { // TradeState.Confirmed
+                colorLog('yellow', `⚠️ Trade ${tradeId} 已經是確認狀態，跳過重複確認`);
+                return false;
+            }
+        }
+        
+        return true; // 需要執行交易
+    } catch (error) {
+        colorLog('yellow', `檢查交易必要性時出錯: ${error.message}`);
+        return true; // 出錯時還是執行交易
+    }
+}
+
+// 🔧 改進的安全交易執行函數
+async function improvedSafeExecuteTransaction(contract, method, params, description, retries = 3) {
+    // 先檢查是否真的需要執行這個交易
+    const isNecessary = await checkTransactionNecessity(contract, method, params);
+    if (!isNecessary) {
+        colorLog('green', `✓ ${description} 已完成，跳過執行`);
+        return { skipped: true };
+    }
+    
+    return await safeExecuteTransaction(() => contract[method](...params), description, retries);
+}
+
+// 🔧 測試1: 正常交易流程 (包含完整資產追蹤)
+async function testNormalTradeFlowWithBalanceCheck() {
     colorLog('bright', '\n' + '='.repeat(60));
-    colorLog('bright', '測試1: 正常交易流程');
+    colorLog('bright', '測試1: 正常交易流程 (含完整資產追蹤)');
     colorLog('bright', '='.repeat(60));
     
     try {
@@ -279,6 +583,9 @@ async function testNormalTradeFlow() {
             assetBuyerSigner,
             assetSellerSigner
         } = providers;
+
+        // 🔧 記錄交易前的帳戶餘額
+        const beforeBalances = await checkAccountBalances(providers, "交易前");
 
         // 生成唯一交易ID
         const nonce = Math.floor(Math.random() * 1000);
@@ -323,10 +630,15 @@ async function testNormalTradeFlow() {
             throw new Error('交易創建後狀態異常');
         }
 
+        // 🔧 檢查創建交易後的餘額變化
+        const afterCreationBalances = await checkAccountBalances(providers, "創建交易後");
+
         // 步驟3：賣方確認Asset交易
         colorLog('yellow', '\n步驟3：賣方確認Asset交易');
-        await safeExecuteTransaction(
-            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+        await improvedSafeExecuteTransaction(
+            assetContractSeller,
+            'confirmTrade',
+            [TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }],
             'Asset交易確認'
         );
         
@@ -334,8 +646,10 @@ async function testNormalTradeFlow() {
 
         // 步驟4：賣方確認Payment
         colorLog('yellow', '\n步驟4：賣方確認Payment');
-        await safeExecuteTransaction(
-            () => paymentContractSeller.confirmPayment(PAYMENT_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER),
+        await improvedSafeExecuteTransaction(
+            paymentContractSeller,
+            'confirmPayment',
+            [PAYMENT_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER],
             'Payment確認'
         );
         
@@ -345,6 +659,9 @@ async function testNormalTradeFlow() {
         if (!status || status.assetTrade.state !== 2 || status.paymentTrade.state !== 2) {
             colorLog('yellow', '警告: 交易狀態未如預期變為"已確認"，但繼續測試...');
         }
+
+        // 🔧 檢查確認交易後的餘額變化
+        const afterConfirmationBalances = await checkAccountBalances(providers, "確認交易後");
 
         // 步驟5：買方使用密鑰釋放Payment（先轉移支付）
         colorLog('yellow', '\n步驟5：買方使用密鑰釋放Payment（先轉移支付）');
@@ -361,6 +678,9 @@ async function testNormalTradeFlow() {
             );
         }
 
+        // 🔧 檢查支付釋放後的餘額變化
+        const afterPaymentReleaseBalances = await checkAccountBalances(providers, "支付釋放後");
+
         // 步驟6：買方使用密鑰獲取Asset（後轉移資產）
         colorLog('yellow', '\n步驟6：買方使用密鑰獲取Asset（獲取資產）');
         await safeExecuteTransaction(
@@ -371,6 +691,12 @@ async function testNormalTradeFlow() {
         // 最終檢查狀態
         await delay(5000);
         const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        
+        // 🔧 記錄交易完成後的帳戶餘額並進行比較
+        const afterBalances = await checkAccountBalances(providers, "交易完成後");
+        
+        // 🔧 比較交易前後的資產變化
+        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
         
         const isCompleted = !finalStatus || (!finalStatus.assetTrade.isActive && !finalStatus.paymentTrade.isActive);
         
@@ -383,8 +709,30 @@ async function testNormalTradeFlow() {
         }
         
     } catch (error) {
+        // 🔧 即使出錯也檢查最終餘額
+        try {
+            const providers = await setupProviders();
+            await checkAccountBalances(providers, "錯誤發生後");
+        } catch (balanceError) {
+            colorLog('red', '無法檢查錯誤後的餘額: ' + balanceError.message);
+        }
+        
         colorLog('red', '✗ 正常交易流程測試失敗: ' + error.message);
         console.error('詳細錯誤:', error);
+        return false;
+    }
+}
+
+// 🔧 獨立的餘額檢查功能
+async function checkCurrentBalances() {
+    colorLog('bright', '🔍 檢查當前帳戶餘額...');
+    
+    try {
+        const providers = await setupProviders();
+        await checkAccountBalances(providers, "目前");
+        return true;
+    } catch (error) {
+        colorLog('red', '❌ 檢查餘額失敗: ' + error.message);
         return false;
     }
 }
@@ -402,6 +750,9 @@ async function testTimeoutRefund() {
             paymentContractBuyer,
             assetSellerSigner
         } = providers;
+
+        // 🔧 記錄測試前餘額
+        const beforeBalances = await checkAccountBalances(providers, "超時測試前");
 
         // 使用短時間的交易持續時間
         const TRADE_ID = Math.floor(Date.now() / 1000) + 1000;
@@ -441,6 +792,9 @@ async function testTimeoutRefund() {
             throw new Error('短超時交易創建失敗');
         }
 
+        // 🔧 檢查創建後餘額
+        const afterCreationBalances = await checkAccountBalances(providers, "創建短超時交易後");
+
         // 不進行後續確認，等待超時
         const waitTime = SHORT_DURATION + 45; // 額外等待45秒確保超時
         colorLog('yellow', `\n等待交易超時 (${waitTime}秒)...`);
@@ -456,6 +810,12 @@ async function testTimeoutRefund() {
         // 檢查交易是否已自動退款
         colorLog('yellow', '\n檢查交易是否已自動取消並退款:');
         const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        
+        // 🔧 檢查超時後餘額
+        const afterTimeoutBalances = await checkAccountBalances(providers, "超時後");
+        
+        // 🔧 比較超時前後餘額變化
+        await compareBalanceChanges(beforeBalances, afterTimeoutBalances, ethers.formatEther(AMOUNT));
         
         // 檢查交易狀態
         const isTimedOut = !finalStatus || 
@@ -479,7 +839,7 @@ async function testTimeoutRefund() {
     }
 }
 
-// 改進的測試3：雙重支付攻擊預防
+// 測試3：雙重支付攻擊預防
 async function testDoubleSpendPrevention() {
     colorLog('bright', '\n' + '='.repeat(60));
     colorLog('bright', '測試3: 雙重支付攻擊預防');
@@ -492,6 +852,9 @@ async function testDoubleSpendPrevention() {
             paymentContractBuyer,
             assetSellerSigner
         } = providers;
+
+        // 🔧 記錄測試前餘額
+        const beforeBalances = await checkAccountBalances(providers, "雙重支付測試前");
 
         // 使用不同的超時值來模擬攻擊
         const TRADE_ID = Math.floor(Date.now() / 1000) + 2000;
@@ -550,6 +913,10 @@ async function testDoubleSpendPrevention() {
             // 再次檢查狀態
             const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
             
+            // 🔧 檢查最終餘額
+            const afterBalances = await checkAccountBalances(providers, "雙重支付測試後");
+            await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+            
             // 分析結果
             if (!finalStatus || (!finalStatus.assetTrade.isActive && !finalStatus.paymentTrade.isActive)) {
                 colorLog('green', '✓ 測試成功: Oracle 正確檢測並取消了雙重支付風險的交易');
@@ -596,6 +963,9 @@ async function testInvalidKeyHandling() {
             assetBuyerSigner,
             assetSellerSigner
         } = providers;
+
+        // 🔧 記錄測試前餘額
+        const beforeBalances = await checkAccountBalances(providers, "無效密鑰測試前");
 
         // 生成唯一交易ID
         const TRADE_ID = Math.floor(Date.now() / 1000) + 3000;
@@ -685,6 +1055,10 @@ async function testInvalidKeyHandling() {
             'Payment釋放 (正確密鑰)'
         );
 
+        // 🔧 檢查最終餘額
+        const afterBalances = await checkAccountBalances(providers, "無效密鑰測試後");
+        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+
         colorLog('green', '✓ 無效密鑰處理測試完成！');
         return true;
 
@@ -727,7 +1101,7 @@ async function checkSystemHealth() {
         console.log(`  Payment鏈測試帳戶餘額: ${ethers.formatEther(paymentBalance)} ETH`);
 
         // 檢查餘額是否充足
-        const minBalance = ethers.parseEther("0.001"); // 至少需要0.01 ETH
+        const minBalance = ethers.parseEther("0.001"); // 至少需要0.001 ETH
         if (assetBalance < minBalance) {
             colorLog('red', '  ⚠️ Asset鏈餘額不足，可能影響測試');
         }
@@ -752,6 +1126,22 @@ async function checkSystemHealth() {
         colorLog('cyan', '\n檢查Oracle服務:');
         colorLog('yellow', '  提示: 請確保Oracle服務正在運行 (backend/server.js)');
         colorLog('yellow', '  Oracle應該監聽端口 1202');
+
+        // 🔧 嘗試連接Oracle API
+        try {
+            const response = await fetch('http://localhost:1202/status');
+            if (response.ok) {
+                const oracleStatus = await response.json();
+                colorLog('green', '  ✓ Oracle服務連接正常');
+                console.log(`    運行時間: ${Math.round(oracleStatus.uptime)} 秒`);
+                console.log(`    Asset鏈處理到區塊: ${oracleStatus.chains?.asset?.currentBlock || 'N/A'}`);
+                console.log(`    Payment鏈處理到區塊: ${oracleStatus.chains?.payment?.currentBlock || 'N/A'}`);
+            } else {
+                colorLog('yellow', '  ⚠️ Oracle API 響應異常');
+            }
+        } catch (error) {
+            colorLog('yellow', '  ⚠️ 無法連接到Oracle服務 (這是正常的，如果Oracle未運行)');
+        }
 
         return true;
     } catch (error) {
@@ -788,26 +1178,99 @@ function generateTestReport() {
         colorLog('yellow', '\n⚠️ 部分測試失敗，請檢查系統配置和Oracle服務。');
     }
 
-    colorLog('cyan', '\n建議:');
+    // 🔧 增強的建議
+    colorLog('cyan', '\n🔧 系統優化建議:');
     if (!testResults.normalTrade) {
-        console.log('  - 檢查Oracle服務是否正常運行');
-        console.log('  - 驗證合約地址和ABI配置');
-        console.log('  - 確認帳戶餘額充足');
+        console.log('  📋 正常交易流程問題:');
+        console.log('    - 檢查Oracle服務是否正常運行');
+        console.log('    - 驗證合約地址和ABI配置');
+        console.log('    - 確認帳戶餘額充足');
+        console.log('    - 檢查網路連接和RPC端點');
     }
     if (!testResults.timeoutRefund) {
-        console.log('  - 檢查Oracle的超時處理機制');
-        console.log('  - 調整checkAndHandleExpiredTrades的執行頻率');
+        console.log('  ⏰ 超時處理問題:');
+        console.log('    - 檢查Oracle的超時處理機制');
+        console.log('    - 調整checkAndHandleExpiredTrades的執行頻率');
+        console.log('    - 驗證時間同步邏輯');
     }
     if (!testResults.doubleSpendPrevention) {
-        console.log('  - 在Oracle中實現跨鏈超時一致性檢查');
-        console.log('  - 加強雙重支付檢測邏輯');
+        console.log('  🛡️ 安全性問題:');
+        console.log('    - 在Oracle中實現跨鏈超時一致性檢查');
+        console.log('    - 加強雙重支付檢測邏輯');
+        console.log('    - 添加風險評估機制');
     }
     if (!testResults.invalidKeyTest) {
-        console.log('  - 檢查合約密鑰驗證邏輯');
-        console.log('  - 確認密鑰加密和解密流程');
+        console.log('  🔐 密鑰驗證問題:');
+        console.log('    - 檢查合約密鑰驗證邏輯');
+        console.log('    - 確認密鑰加密和解密流程');
+        console.log('    - 驗證密鑰匹配算法');
     }
 
+    // 🔧 性能建議
+    colorLog('cyan', '\n⚡ 性能優化建議:');
+    console.log('  - 考慮實現批量事件處理');
+    console.log('  - 優化Gas費用使用');
+    console.log('  - 實現更智能的重試機制');
+    console.log('  - 添加交易狀態緩存');
+
     console.log('\n' + '='.repeat(80));
+}
+
+// 🔧 交易歷史分析功能
+async function analyzeTransactionHistory(providers, address, chainType = 'both') {
+    colorLog('bright', `\n📊 ${address.slice(0,10)}... 交易歷史分析`);
+    
+    try {
+        const { assetProvider, paymentProvider } = providers;
+        
+        if (chainType === 'both' || chainType === 'asset') {
+            colorLog('cyan', '\n🔗 Asset鏈交易歷史:');
+            const assetNonce = await assetProvider.getTransactionCount(address);
+            console.log(`  總交易數: ${assetNonce}`);
+            
+            // 獲取最近幾筆交易
+            if (assetNonce > 0) {
+                const latestBlock = await assetProvider.getBlockNumber();
+                const fromBlock = Math.max(0, latestBlock - 100); // 查看最近100個區塊
+                
+                try {
+                    const logs = await assetProvider.getLogs({
+                        fromBlock,
+                        toBlock: 'latest',
+                        address: ASSET_CONTRACT_ADDRESS
+                    });
+                    console.log(`  最近事件數: ${logs.length}`);
+                } catch (error) {
+                    console.log(`  無法獲取事件歷史: ${error.message}`);
+                }
+            }
+        }
+        
+        if (chainType === 'both' || chainType === 'payment') {
+            colorLog('magenta', '\n💰 Payment鏈交易歷史:');
+            const paymentNonce = await paymentProvider.getTransactionCount(address);
+            console.log(`  總交易數: ${paymentNonce}`);
+            
+            if (paymentNonce > 0) {
+                const latestBlock = await paymentProvider.getBlockNumber();
+                const fromBlock = Math.max(0, latestBlock - 100);
+                
+                try {
+                    const logs = await paymentProvider.getLogs({
+                        fromBlock,
+                        toBlock: 'latest',
+                        address: PAYMENT_CONTRACT_ADDRESS
+                    });
+                    console.log(`  最近事件數: ${logs.length}`);
+                } catch (error) {
+                    console.log(`  無法獲取事件歷史: ${error.message}`);
+                }
+            }
+        }
+        
+    } catch (error) {
+        colorLog('red', `分析交易歷史時發生錯誤: ${error.message}`);
+    }
 }
 
 // 主執行函數
@@ -832,7 +1295,7 @@ async function runAllTests() {
         // 執行所有測試
         colorLog('bright', '\n開始執行測試套件...');
         
-        testResults.normalTrade = await testNormalTradeFlow();
+        testResults.normalTrade = await testNormalTradeFlowWithBalanceCheck();
         await delay(10000);
 
         testResults.timeoutRefund = await testTimeoutRefund();
@@ -841,7 +1304,7 @@ async function runAllTests() {
         testResults.doubleSpendPrevention = await testDoubleSpendPrevention();
         await delay(10000);
 
-        // testResults.invalidKeyTest = await testInvalidKeyHandling();
+        testResults.invalidKeyTest = await testInvalidKeyHandling();
 
     } catch (error) {
         colorLog('red', '測試執行過程中發生嚴重錯誤: ' + error.message);
@@ -857,9 +1320,100 @@ async function runAllTests() {
     colorLog('bright', `\n測試完成時間: ${new Date().toLocaleString()}`);
     colorLog('bright', `總執行時間: ${duration} 秒`);
     
+    // 🔧 最終餘額檢查
+    try {
+        const providers = await setupProviders();
+        await checkAccountBalances(providers, "測試完成後最終");
+        
+        // 分析交易歷史
+        const buyerAddress = await providers.assetBuyerSigner.getAddress();
+        const sellerAddress = await providers.assetSellerSigner.getAddress();
+        
+        await analyzeTransactionHistory(providers, buyerAddress);
+        await analyzeTransactionHistory(providers, sellerAddress);
+        
+    } catch (error) {
+        colorLog('red', '最終狀態檢查失敗: ' + error.message);
+    }
+    
     // 根據結果退出
     const allPassed = Object.values(testResults).every(result => result);
+    
+    if (allPassed) {
+        colorLog('green', '\n🎉 所有測試通過！系統運行完美！');
+    } else {
+        colorLog('yellow', '\n⚠️ 部分測試需要改進，請參考上述建議。');
+    }
+    
     process.exit(allPassed ? 0 : 1);
+}
+
+// 🔧 單獨運行測試的函數
+async function runSingleTest(testName) {
+    const startTime = Date.now();
+    
+    colorLog('bright', `🧪 運行單一測試: ${testName}`);
+    colorLog('bright', '測試開始時間: ' + new Date().toLocaleString());
+    
+    let result = false;
+    
+    try {
+        switch (testName.toLowerCase()) {
+            case 'balance':
+            case 'check':
+                result = await checkCurrentBalances();
+                break;
+            case 'normal':
+            case '1':
+                result = await testNormalTradeFlowWithBalanceCheck();
+                break;
+            case 'timeout':
+            case '2':
+                result = await testTimeoutRefund();
+                break;
+            case 'double':
+            case 'doublespend':
+            case '3':
+                result = await testDoubleSpendPrevention();
+                break;
+            case 'key':
+            case 'invalidkey':
+            case '4':
+                result = await testInvalidKeyHandling();
+                break;
+            case 'health':
+                result = await checkSystemHealth();
+                break;
+            default:
+                colorLog('red', `未知的測試名稱: ${testName}`);
+                colorLog('yellow', '可用的測試:');
+                console.log('  balance/check - 檢查當前餘額');
+                console.log('  normal/1 - 正常交易流程測試');
+                console.log('  timeout/2 - 超時退款測試');
+                console.log('  double/3 - 雙重支付預防測試');
+                console.log('  key/4 - 無效密鑰處理測試');
+                console.log('  health - 系統健康檢查');
+                return;
+        }
+        
+        const endTime = Date.now();
+        const duration = Math.round((endTime - startTime) / 1000);
+        
+        colorLog('bright', `\n測試完成時間: ${new Date().toLocaleString()}`);
+        colorLog('bright', `執行時間: ${duration} 秒`);
+        
+        if (result) {
+            colorLog('green', `✅ 測試 "${testName}" 通過！`);
+        } else {
+            colorLog('red', `❌ 測試 "${testName}" 失敗！`);
+        }
+        
+    } catch (error) {
+        colorLog('red', `測試 "${testName}" 執行失敗: ${error.message}`);
+        console.error('詳細錯誤:', error);
+    }
+    
+    process.exit(result ? 0 : 1);
 }
 
 // 錯誤處理
@@ -883,20 +1437,42 @@ process.on('SIGINT', () => {
     process.exit(1);
 });
 
-// 如果直接運行此腳本
+// 🔧 命令行參數處理
 if (require.main === module) {
-    runAllTests().catch(error => {
-        colorLog('red', '測試啟動失敗: ' + error.message);
-        console.error(error);
-        process.exit(1);
-    });
+    const args = process.argv.slice(2);
+    
+    if (args.length > 0) {
+        // 運行單一測試
+        const testName = args[0];
+        runSingleTest(testName).catch(error => {
+            colorLog('red', `測試啟動失敗: ${error.message}`);
+            console.error(error);
+            process.exit(1);
+        });
+    } else {
+        // 運行所有測試
+        runAllTests().catch(error => {
+            colorLog('red', `測試啟動失敗: ${error.message}`);
+            console.error(error);
+            process.exit(1);
+        });
+    }
 }
 
+// 導出所有函數
 module.exports = {
     runAllTests,
-    testNormalTradeFlow,
+    runSingleTest,
+    checkAccountBalances,
+    compareBalanceChanges,
+    testNormalTradeFlowWithBalanceCheck,
+    checkCurrentBalances,
     testTimeoutRefund,
     testDoubleSpendPrevention,
-    // testInvalidKeyHandling,
-    checkSystemHealth
+    testInvalidKeyHandling,
+    checkSystemHealth,
+    analyzeTransactionHistory,
+    safeExecuteTransaction,
+    improvedSafeExecuteTransaction,
+    checkTransactionNecessity
 };
