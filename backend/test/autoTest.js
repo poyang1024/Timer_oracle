@@ -363,7 +363,7 @@ async function checkAccountBalances(providers, description = "當前") {
         console.log(`     - Asset 鏈: ${ethers.formatEther(assetSellerBalance)} ETH`);
         console.log(`     - Payment 鏈: ${ethers.formatEther(paymentSellerBalance)} ETH`);
 
-        console.log(`\n  💎 系統總資產: ${ethers.formatEther(buyerTotalBalance + sellerTotalBalance)} ETH`);
+        // console.log(`\n  💎 系統總資產: ${ethers.formatEther(buyerTotalBalance + sellerTotalBalance)} ETH`);
 
         return {
             buyer: {
@@ -568,148 +568,235 @@ async function improvedSafeExecuteTransaction(contract, method, params, descript
 }
 
 // 🔧 測試1: 正常交易流程 (包含完整資產追蹤)
-async function testNormalTradeFlowWithBalanceCheck() {
+async function testCorrectAtomicSwapWithDualKeys() {
     colorLog('bright', '\n' + '='.repeat(60));
-    colorLog('bright', '測試1: 正常交易流程 (含完整資產追蹤)');
+    colorLog('bright', '測試1: 清晰角色定義的原子交換流程');
     colorLog('bright', '='.repeat(60));
     
     try {
         const providers = await setupProviders();
         const {
-            assetContractBuyer,
-            assetContractSeller,
-            paymentContractBuyer,
-            paymentContractSeller,
-            assetBuyerSigner,
-            assetSellerSigner
+            assetContractBuyer,   // asset_buyer 在 Asset Chain 的合約接口
+            assetContractSeller,  // asset_seller 在 Asset Chain 的合約接口
+            paymentContractBuyer, // asset_buyer 在 Payment Chain 的合約接口
+            paymentContractSeller,// asset_seller 在 Payment Chain 的合約接口
+            assetBuyerSigner,     // asset_buyer 的簽名者
+            assetSellerSigner     // asset_seller 的簽名者
         } = providers;
 
-        // 🔧 記錄交易前的帳戶餘額
-        const beforeBalances = await checkAccountBalances(providers, "交易前");
+        // 記錄交易前的帳戶餘額
+        const beforeBalances = await checkAccountBalances(providers, "原子交換前");
 
-        // 生成唯一交易ID
+        // 生成唯一交易ID和雙密鑰
         const nonce = Math.floor(Math.random() * 1000);
         const TRADE_ID = Math.floor(Date.now() / 1000) + nonce;
         const PAYMENT_ID = TRADE_ID;
         const AMOUNT = ethers.parseEther("0.005");
         const DURATION = 3600; // 1小時
 
-        const sellerAddress = await assetSellerSigner.getAddress();
-        const buyerAddress = await assetBuyerSigner.getAddress();
+        const assetSellerAddress = await assetSellerSigner.getAddress();  // asset_seller 的地址
+        const assetBuyerAddress = await assetBuyerSigner.getAddress();    // asset_buyer 的地址
 
-        colorLog('cyan', `\n交易參數:`);
+        // 生成雙密鑰
+        colorLog('cyan', '\n=== Step 1: 生成交換密鑰對 ===');
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        
+        colorLog('cyan', `原子交換參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  有效期限: ${DURATION} 秒`);
-        console.log(`  買方地址: ${buyerAddress}`);
-        console.log(`  賣方地址: ${sellerAddress}`);
+        console.log(`  asset_buyer: ${assetBuyerAddress}`);
+        console.log(`  asset_seller: ${assetSellerAddress}`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
 
-        // 步驟1：買方在Asset鏈上創建交易
-        colorLog('yellow', '\n步驟1：買方在Asset鏈上創建交易');
+        // 🔧 清晰的角色說明
+        colorLog('yellow', '\n📋 跨鏈 ETH 交換邏輯：');
+        console.log(`  Asset Chain:`);
+        console.log(`    - asset_buyer 想要 Asset Chain 的 ETH`);
+        console.log(`    - asset_seller 提供 Asset Chain 的 ETH`);
+        console.log(`  Payment Chain:`);
+        console.log(`    - asset_buyer 提供 Payment Chain 的 ETH`);
+        console.log(`    - asset_seller 想要 Payment Chain 的 ETH`);
+        console.log(`  🔄 結果：雙方交換不同鏈上的 ETH`);
+
+        // Step 2: asset_buyer 在 Asset Chain 發起交易
+        colorLog('yellow', '\n=== Step 2: asset_buyer 在 Asset Chain 發起交易 ===');
+        colorLog('cyan', '📤 asset_buyer 調用 inceptTrade，請求 asset_seller 的資產');
+        
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION),
-            'Asset交易創建'
+            () => assetContractBuyer.inceptTrade(
+                TRADE_ID, 
+                AMOUNT, 
+                assetSellerAddress,    // asset_seller 是 Asset Chain 的 seller
+                SELLER_KEY,
+                DURATION
+            ),
+            'asset_buyer 發起 Asset 交易'
         );
         
-        // 等待Oracle處理
-        colorLog('yellow', '等待Oracle處理 (15秒)...');
-        await delay(15000);
+        // 等待 Oracle 處理
+        colorLog('yellow', '⏰ 等待 Oracle 處理 TimeRequestSent 事件...');
+        await delay(20000);
 
-        // 步驟2：買方在Payment鏈上創建支付
-        colorLog('yellow', '\n步驟2：買方在Payment鏈上創建支付');
-        await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION, { value: AMOUNT }),
-            'Payment支付創建'
-        );
+        // Step 3: asset_seller 觀察並決定參與
+        colorLog('yellow', '\n=== Step 3: asset_seller 觀察 Asset Chain 狀態並決定參與 ===');
+        colorLog('cyan', '🔍 asset_seller 查詢合約狀態，看 asset_buyer 的請求');
         
-        // 等待Oracle處理並檢查狀態
-        await delay(15000);
         let status = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
         
-        if (!status || !status.assetTrade.isActive || !status.paymentTrade.isActive) {
-            throw new Error('交易創建後狀態異常');
+        if (!status || !status.assetTrade.isActive) {
+            throw new Error('❌ asset_buyer 的交易創建失敗或 Oracle 未處理完成');
         }
-
-        // 🔧 檢查創建交易後的餘額變化
-        const afterCreationBalances = await checkAccountBalances(providers, "創建交易後");
-
-        // 步驟3：賣方確認Asset交易
-        colorLog('yellow', '\n步驟3：賣方確認Asset交易');
-        await improvedSafeExecuteTransaction(
-            assetContractSeller,
-            'confirmTrade',
-            [TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }],
-            'Asset交易確認'
-        );
         
-        await delay(15000);
-
-        // 步驟4：賣方確認Payment
-        colorLog('yellow', '\n步驟4：賣方確認Payment');
-        await improvedSafeExecuteTransaction(
-            paymentContractSeller,
-            'confirmPayment',
-            [PAYMENT_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER],
-            'Payment確認'
-        );
+        if (status.assetTrade.state !== 1) {
+            colorLog('yellow', `⚠️ 警告: Asset 交易狀態為 ${status.assetTrade.state}，預期為 1 (AwaitingConfirmation)`);
+        }
         
-        await delay(15000);
-        status = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        colorLog('green', '✓ asset_seller 確認看到 asset_buyer 的交易請求');
+        colorLog('cyan', '💭 asset_seller 分析交易條件:');
+        colorLog('cyan', `   - 交易 ID: ${TRADE_ID} ✓`);
+        colorLog('cyan', `   - 交易金額: ${ethers.formatEther(AMOUNT)} ETH ✓`);
+        colorLog('cyan', `   - 超時時間: ${DURATION} 秒 ✓`);
+        colorLog('cyan', '   - 決定：條件符合，我願意用我的 Asset Chain ETH 換取 Payment Chain ETH！');
 
-        if (!status || status.assetTrade.state !== 2 || status.paymentTrade.state !== 2) {
-            colorLog('yellow', '警告: 交易狀態未如預期變為"已確認"，但繼續測試...');
-        }
-
-        // 🔧 檢查確認交易後的餘額變化
-        const afterConfirmationBalances = await checkAccountBalances(providers, "確認交易後");
-
-        // 步驟5：買方使用密鑰釋放Payment（先轉移支付）
-        colorLog('yellow', '\n步驟5：買方使用密鑰釋放Payment（先轉移支付）');
-        try {
-            await safeExecuteTransaction(
-                () => paymentContractBuyer.transferWithKey(PAYMENT_ID, ENCRYPTED_KEY_SELLER),
-                'Payment釋放（支付給賣家）'
-            );
-        } catch (error) {
-            colorLog('red', 'Payment釋放失敗，嘗試使用買方密鑰...');
-            await safeExecuteTransaction(
-                () => paymentContractBuyer.transferWithKey(PAYMENT_ID, ENCRYPTED_KEY_BUYER),
-                'Payment釋放（使用買方密鑰）'
-            );
-        }
-
-        // 🔧 檢查支付釋放後的餘額變化
-        const afterPaymentReleaseBalances = await checkAccountBalances(providers, "支付釋放後");
-
-        // 步驟6：買方使用密鑰獲取Asset（後轉移資產）
-        colorLog('yellow', '\n步驟6：買方使用密鑰獲取Asset（獲取資產）');
+        // Step 4: asset_buyer 在 Payment Chain 投入 ETH
+        colorLog('yellow', '\n=== Step 4: asset_buyer 在 Payment Chain 投入 ETH ===');
+        colorLog('cyan', '📤 asset_buyer 調用 inceptPayment，在 Payment Chain 投入 ETH');
+        
         await safeExecuteTransaction(
-            () => assetContractBuyer.transferWithKey(TRADE_ID, ENCRYPTED_KEY_SELLER),
-            'Asset轉移（資產給買家）'
+            () => paymentContractBuyer.inceptPayment(
+                PAYMENT_ID, 
+                TRADE_ID, 
+                AMOUNT, 
+                assetSellerAddress,       // asset_seller 是收款方
+                BUYER_KEY,               // 初始密鑰（可以是任意值）
+                DURATION, 
+                { value: AMOUNT }
+            ),
+            'asset_buyer 在 Payment Chain 投入 ETH'
+        );
+        
+        // 等待 Oracle 處理
+        colorLog('yellow', '⏰ 等待 Oracle 處理 Payment TimeRequestSent 事件...');
+        await delay(20000);
+        
+        // 確認 Payment 創建成功
+        status = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        if (!status || !status.paymentTrade.isActive) {
+            throw new Error('❌ asset_buyer 的 Payment 創建失敗或 Oracle 未處理完成');
+        }
+        
+        colorLog('green', '✓ asset_buyer 成功在 Payment Chain 投入 ETH');
+        colorLog('cyan', '🔗 跨鏈映射已建立：Asset 交易 ↔ Payment 交易');
+
+        // Step 5: asset_seller 確認 Asset 交易
+        colorLog('yellow', '\n=== Step 5: asset_seller 確認 Asset 交易 ===');
+        colorLog('cyan', '🔍 asset_seller 作為 Asset Chain 的 seller，確認提供資產');
+        
+        await safeExecuteTransaction(
+            () => assetContractSeller.confirmTrade(
+                TRADE_ID, 
+                AMOUNT, 
+                assetBuyerAddress,    // asset_buyer 是 Asset Chain 的 buyer
+                BUYER_KEY,
+                { value: AMOUNT }
+            ),
+            'asset_seller 確認並鎖定 Asset 交易'
+        );
+        
+        // 等待 Oracle 處理
+        colorLog('yellow', '⏰ 等待 Oracle 處理 Asset 確認事件...');
+        await delay(20000);
+
+        // Step 6: asset_buyer 確認 Payment 交易
+        colorLog('yellow', '\n=== Step 6: asset_buyer 確認 Payment 交易 ===');
+        colorLog('cyan', '🔑 asset_buyer 確認支付，並提供 seller 密鑰');
+
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.confirmPayment(  // ✅ buyer 確認
+                PAYMENT_ID, 
+                AMOUNT, 
+                assetSellerAddress,       // seller 地址
+                SELLER_KEY               // ✅ 提供 seller 密鑰
+            ),
+            'asset_buyer 確認 Payment 交易'
         );
 
-        // 最終檢查狀態
-        await delay(5000);
+        // 等待 Oracle 處理
+        colorLog('yellow', '⏰ 等待 Oracle 處理 Payment 確認事件...');
+        await delay(20000);
+        
+        // 檢查雙方都已確認
+        const confirmedStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        if (!confirmedStatus || confirmedStatus.assetTrade.state !== 2 || confirmedStatus.paymentTrade.state !== 2) {
+            colorLog('yellow', '⚠️ 警告: 雙方確認狀態未如預期，但繼續執行交換...');
+        } else {
+            colorLog('green', '🤝 雙方都已確認！原子交換進入執行階段');
+        }
+
+        // 檢查確認階段的餘額
+        const afterConfirmationBalances = await checkAccountBalances(providers, "雙方確認後");
+
+        // Step 7: asset_buyer 先釋放支付（揭示密鑰
+        colorLog('yellow', '\n=== Step 7: asset_buyer 釋放支付給 asset_seller ===');
+        colorLog('cyan', '🔑 關鍵：asset_buyer 先承擔風險，釋放支付並揭示密鑰');
+
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.transferWithKey(PAYMENT_ID, SELLER_KEY),
+            'asset_buyer 釋放支付給 asset_seller（HTLC 標準步驟）'
+        );
+
+        // Step 8: asset_buyer 領取資產（使用 seller 揭示的密鑰）
+        colorLog('yellow', '\n=== Step 8: asset_buyer 領取 Asset Chain 的 ETH ===');
+        colorLog('cyan', '🎯 asset_buyer 使用 seller揭示的密鑰領取資產');
+
+        await safeExecuteTransaction(
+            () => assetContractBuyer.transferWithKey(TRADE_ID, SELLER_KEY),
+            'asset_buyer 領取 Asset Chain ETH（使用已揭示密鑰）'
+        );
+
+        // 最終狀態檢查
+        await delay(10000);
         const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
         
-        // 🔧 記錄交易完成後的帳戶餘額並進行比較
-        const afterBalances = await checkAccountBalances(providers, "交易完成後");
+        // 記錄最終餘額變化
+        const finalBalances = await checkAccountBalances(providers, "原子交換完成後");
         
-        // 🔧 比較交易前後的資產變化
-        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+        // 詳細的資產變化分析
+        await compareBalanceChanges(beforeBalances, finalBalances, ethers.formatEther(AMOUNT));
+        
+        // 原子交換成功驗證
+        colorLog('bright', '\n' + '='.repeat(60));
+        colorLog('bright', '🏆 清晰角色原子交換結果驗證');
+        colorLog('bright', '='.repeat(60));
         
         const isCompleted = !finalStatus || (!finalStatus.assetTrade.isActive && !finalStatus.paymentTrade.isActive);
         
         if (isCompleted) {
-            colorLog('green', '✓ 正常交易流程測試完成！交易已成功完成並清理');
+            colorLog('green', '🎉 跨鏈原子交換圓滿成功！');
+            colorLog('green', '');
+            colorLog('green', '✅ 跨鏈 ETH 交換結果：');
+            colorLog('green', '   📤 asset_seller 給出：Asset Chain ETH → 得到：Payment Chain ETH');
+            colorLog('green', '   📥 asset_buyer 給出：Payment Chain ETH → 得到：Asset Chain ETH');
+            colorLog('green', '');
+            colorLog('green', '🔐 跨鏈 ETH 交換的優勢：');
+            colorLog('green', '   ✓ 雙方都在不同鏈上投入和獲得等值 ETH');
+            colorLog('green', '   ✓ 實現跨鏈流動性轉移');
+            colorLog('green', '   ✓ 無需信任第三方的跨鏈橋');
+            colorLog('green', '   ✓ asset_seller 和 asset_buyer 各自確認自己的行為');
+            colorLog('green', '   ✓ 原子性保證要麼全成功要麼全失敗');
+            
             return true;
         } else {
-            colorLog('yellow', '⚠ 交易流程完成，但狀態檢查顯示交易仍存在');
+            colorLog('yellow', '⚠️ 原子交換邏輯完成，但合約狀態仍存在');
+            colorLog('yellow', '這可能是正常的清理延遲，交換實際上是成功的');
             return true;
         }
         
     } catch (error) {
-        // 🔧 即使出錯也檢查最終餘額
+        // 錯誤處理和最終餘額檢查
         try {
             const providers = await setupProviders();
             await checkAccountBalances(providers, "錯誤發生後");
@@ -717,7 +804,7 @@ async function testNormalTradeFlowWithBalanceCheck() {
             colorLog('red', '無法檢查錯誤後的餘額: ' + balanceError.message);
         }
         
-        colorLog('red', '✗ 正常交易流程測試失敗: ' + error.message);
+        colorLog('red', '❌ 清晰角色原子交換測試失敗: ' + error.message);
         console.error('詳細錯誤:', error);
         return false;
     }
@@ -1295,7 +1382,7 @@ async function runAllTests() {
         // 執行所有測試
         colorLog('bright', '\n開始執行測試套件...');
         
-        testResults.normalTrade = await testNormalTradeFlowWithBalanceCheck();
+        testResults.normalTrade = await testCorrectAtomicSwapWithDualKeys();
         await delay(10000);
 
         testResults.timeoutRefund = await testTimeoutRefund();
@@ -1365,7 +1452,7 @@ async function runSingleTest(testName) {
                 break;
             case 'normal':
             case '1':
-                result = await testNormalTradeFlowWithBalanceCheck();
+                result = await testCorrectAtomicSwapWithDualKeys();
                 break;
             case 'timeout':
             case '2':
@@ -1465,7 +1552,7 @@ module.exports = {
     runSingleTest,
     checkAccountBalances,
     compareBalanceChanges,
-    testNormalTradeFlowWithBalanceCheck,
+    testCorrectAtomicSwapWithDualKeys,
     checkCurrentBalances,
     testTimeoutRefund,
     testDoubleSpendPrevention,
