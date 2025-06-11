@@ -72,16 +72,16 @@ contract PaymentChain {
         emit TimeRequestSent(requestId, id, duration);
     }
 
-    function confirmPayment(uint id, uint256 amount, address payable buyer, string memory keyEncryptedBuyer) public {
+    function confirmPayment(uint id, uint256 amount, address payable seller, string memory keyEncryptedSeller) public {
         require(payments[id].id != 0, "Payment ID does not exist");
-        require(payments[id].seller == msg.sender, "Only the seller can confirm the payment");
-        require(payments[id].buyer == buyer, "Buyer address does not match");
+        require(payments[id].buyer == msg.sender, "Only the buyer can confirm the payment"); // ✅ buyer 確認
+        require(payments[id].seller == seller, "Seller address does not match");
         require(payments[id].amount == amount, "Amount does not match");
         require(payments[id].state == PaymentState.AwaitingConfirmation, "Payment is not in the correct state");
 
-        emit PaymentConfirmationRequested(id, amount, buyer);
+        emit PaymentConfirmationRequested(id, amount, seller);
         
-        payments[id].keyEncryptedBuyer = keyEncryptedBuyer;
+        payments[id].keyEncryptedSeller = keyEncryptedSeller; // ✅ 存儲 seller 密鑰
         payments[id].state = PaymentState.Confirmed;
         
         bytes32 requestId = keccak256(abi.encodePacked(block.timestamp, id));
@@ -90,6 +90,7 @@ contract PaymentChain {
         emit TimeRequestSent(requestId, id, payments[id].duration);
         emit PaymentConfirmed(id);
     }
+
 
     function fulfillTime(bytes32 _requestId, uint256 _timestamp) external onlyOracle {
         uint paymentId = requestToPaymentId[_requestId];
@@ -129,25 +130,24 @@ contract PaymentChain {
 
     function transferWithKey(uint id, string memory key) public {
         require(payments[id].state == PaymentState.Confirmed, "Payment is not in the correct state");
-        require(payments[id].buyer == msg.sender, "Only the buyer can initiate the transfer");
+        require(payments[id].buyer == msg.sender, "Only the buyer can initiate the transfer"); // ✅ buyer 調用
         require(payments[id].confirmationTime != 0, "Confirmation time not set");
         
         Payment storage payment = payments[id];
         
-        // 修正時間驗證邏輯 - 使用確認時間而非最後更新時間
+        // 時間驗證邏輯
         uint256 timeElapsed;
         if (payment.confirmationTime > payment.inceptionTime) {
             timeElapsed = payment.confirmationTime - payment.inceptionTime;
         } else {
-            // 如果確認時間異常，使用最後更新時間
             timeElapsed = payment.lastOracleUpdate - payment.inceptionTime;
         }
         
         require(timeElapsed <= payment.duration, "Payment duration exceeded");
         
-        // 驗證密鑰 - 注意這裡應該驗證買方提供的密鑰與賣方的加密密鑰
+        // ✅ buyer 使用 seller 的密鑰來釋放支付給 seller
         if (keccak256(abi.encodePacked(key)) == keccak256(abi.encodePacked(payment.keyEncryptedSeller))) {
-            completePayment(id);
+            completePayment(id); // 支付轉給 seller
         } else {
             failPayment(id, "Invalid key provided");
         }
