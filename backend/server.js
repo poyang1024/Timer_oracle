@@ -109,6 +109,61 @@ async function initializeEthers() {
     }
 }
 
+// 🔧 新增：即時雙重支付檢測函數
+async function performImmediateDoubleSpendCheck(assetTradeId, paymentId, assetDuration, paymentDuration) {
+    logger('info', '執行即時雙重支付檢測', {
+        assetTradeId,
+        paymentId,
+        assetDuration,
+        paymentDuration
+    });
+    
+    // 關鍵檢測：Asset 超時小於 Payment 超時
+    if (assetDuration < paymentDuration) {
+        logger('error', '🚨 檢測到雙重支付風險 - Asset超時小於Payment超時', {
+            assetTradeId,
+            paymentId,
+            assetDuration,
+            paymentDuration,
+            riskType: 'ASSET_TIMEOUT_TOO_SHORT'
+        });
+        
+        // 立即取消兩個交易
+        try {
+            await handleAssetFailedConfirmation(assetTradeId);
+            await handlePaymentFailedConfirmation(paymentId);
+            
+            logger('info', '✅ 成功阻止雙重支付攻擊', {
+                assetTradeId,
+                paymentId
+            });
+            
+            // 清理狀態
+            assetTrades.delete(assetTradeId);
+            paymentTrades.delete(paymentId);
+            crossChainTrades.delete(`asset_${assetTradeId}`);
+            crossChainTrades.delete(`payment_${paymentId}`);
+            
+            return { action: 'CANCEL', reason: 'Double spend risk detected' };
+        } catch (error) {
+            logger('error', '處理雙重支付風險時出錯', {
+                assetTradeId,
+                paymentId,
+                error: error.message
+            });
+            throw error;
+        }
+    }
+    
+    // 檢查通過
+    logger('info', '✅ 雙重支付檢測通過', {
+        assetTradeId,
+        paymentId
+    });
+    
+    return { action: 'CONTINUE' };
+}
+
 // Asset Chain handler functions
 async function handleAssetTimeRequest(requestId, tradeId, duration, eventTimestamp) {
     if (processingAssetTrades.has(tradeId)) {
@@ -129,6 +184,24 @@ async function handleAssetTimeRequest(requestId, tradeId, duration, eventTimesta
         const currentTime = Math.floor(Date.now() / 1000);
         
         if (!assetTrades.has(tradeId)) {
+            // 🔧 新增：Asset 交易創建時檢查是否已有對應的 Payment 交易
+            const existingPaymentTrade = paymentTrades.get(tradeId);
+            
+            if (existingPaymentTrade) {
+                // 執行即時雙重支付檢測
+                const checkResult = await performImmediateDoubleSpendCheck(
+                    tradeId, 
+                    tradeId, 
+                    Number(duration), 
+                    existingPaymentTrade.duration
+                );
+                
+                if (checkResult.action === 'CANCEL') {
+                    logger('info', 'Asset交易創建時檢測到風險，已取消', { tradeId });
+                    return;
+                }
+            }
+            
             assetTrades.set(tradeId, { 
                 inceptionTime: currentTime,  // 使用當前時間
                 duration: Number(duration),
@@ -308,6 +381,19 @@ async function handlePaymentTimeRequest(requestId, paymentId, duration, eventTim
             let syncedTimestamp = currentTime;
             
             if (correspondingAssetTrade) {
+                // 🔧 關鍵修改：執行即時雙重支付檢測
+                const checkResult = await performImmediateDoubleSpendCheck(
+                    paymentId, 
+                    paymentId, 
+                    correspondingAssetTrade.duration, 
+                    Number(duration)
+                );
+                
+                if (checkResult.action === 'CANCEL') {
+                    logger('info', 'Payment交易創建時檢測到風險，已取消', { paymentId });
+                    return;
+                }
+                
                 // 使用 Asset 交易的創建時間作為基準
                 syncedTimestamp = correspondingAssetTrade.inceptionTime;
                 
@@ -415,6 +501,7 @@ async function handlePaymentTimeRequest(requestId, paymentId, duration, eventTim
         processNextPaymentEvent();
     }
 }
+
 async function fulfillPaymentTime(requestId, timestamp, retryCount = 0) {
     const maxRetries = 3;
     
@@ -645,7 +732,7 @@ async function checkAndHandleExpiredTrades() {
         }
     }
     
-    // 檢查跨鏈交易的超時風險（保持原有邏輯）
+    // 檢查跨鏈交易的超時風險（保持原有邏輯作為備用機制）
     for (const [key, value] of crossChainTrades.entries()) {
         if (key.startsWith('asset_')) {
             const assetTradeId = key.replace('asset_', '');
@@ -1170,7 +1257,7 @@ setInterval(pollAssetEvents, 15000);
 setInterval(pollPaymentEvents, 15000);
 setInterval(checkAndHandleExpiredTrades, 30000);
 
-const PORT = process.env.PORT || 1202;
+const PORT = process.env.SERVER_PORT || 1202;
 
 // 優雅關閉處理
 function gracefulShutdown(signal) {
