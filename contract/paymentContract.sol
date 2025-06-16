@@ -128,6 +128,15 @@ contract PaymentChain {
         failPayment(paymentId, "Confirmation timeout");
     }
 
+    // 新增：強制執行階段超時處理
+    function handleExecutionTimeout(uint paymentId) external onlyOracle {
+        require(payments[paymentId].id != 0, "Payment does not exist");
+        require(payments[paymentId].state == PaymentState.Confirmed, "Payment must be in confirmed state");
+        require(payments[paymentId].confirmationTime != 0, "Confirmation time not set");
+        
+        failPayment(paymentId, "Execution timeout");
+    }
+
     function transferWithKey(uint id, string memory key) public {
         require(payments[id].state == PaymentState.Confirmed, "Payment is not in the correct state");
         require(payments[id].buyer == msg.sender, "Only the buyer can initiate the transfer"); // ✅ buyer 調用

@@ -212,5 +212,14 @@ contract AssetChain {
         oracle = _oracle;
     }
 
+    // 新增：強制執行階段超時處理
+    function handleExecutionTimeout(uint tradeId) external onlyOracle {
+        require(trades[tradeId].id != 0, "Trade does not exist");
+        require(trades[tradeId].state == TradeState.Confirmed, "Trade must be in confirmed state");
+        require(trades[tradeId].confirmationTime != 0, "Confirmation time not set");
+        
+        failTrade(tradeId, "Execution timeout");
+    }
+
     receive() external payable {}
 }
