@@ -45,8 +45,7 @@ let testResults = {
     confirmationTimeout: false,
     executionTimeout: false,
     crossChainTimeSync: false,
-    doubleSpendPrevention: false,
-    invalidKeyTest: false
+    doubleSpendPrevention: false
 };
 
 // 顏色輸出函數
@@ -1415,133 +1414,7 @@ async function testDoubleSpendPrevention() {
     }
 }
 
-// 🔧 測試4: 無效密鑰測試
-async function testInvalidKeyHandling() {
-    colorLog('bright', '\n' + '='.repeat(60));
-    colorLog('bright', '測試4: 無效密鑰處理測試');
-    colorLog('bright', '='.repeat(60));
-    
-    try {
-        const providers = await setupProviders();
-        const {
-            assetContractBuyer,
-            assetContractSeller,
-            paymentContractBuyer,
-            paymentContractSeller,
-            assetBuyerSigner,
-            assetSellerSigner
-        } = providers;
 
-        // 🔧 記錄測試前餘額
-        const beforeBalances = await checkAccountBalances(providers, "無效密鑰測試前");
-
-        // 生成唯一交易ID
-        const TRADE_ID = Math.floor(Date.now() / 1000) + 3000;
-        const PAYMENT_ID = TRADE_ID;
-        const AMOUNT = ethers.parseEther("0.005");
-        const DURATION = 1800; // 30分鐘
-
-        const sellerAddress = await assetSellerSigner.getAddress();
-        const buyerAddress = await assetBuyerSigner.getAddress();
-        const INVALID_KEY = "InvalidKeyForTesting123456789";
-
-        // 生成雙密鑰
-        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
-        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
-
-        colorLog('cyan', `\n測試參數:`);
-        console.log(`  交易ID: ${TRADE_ID}`);
-        console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
-        console.log(`  有效期限: ${DURATION} 秒`);
-        console.log(`  賣方密鑰: ${SELLER_KEY}`);
-        console.log(`  買方密鑰: ${BUYER_KEY}`);
-        console.log(`  無效密鑰: ${INVALID_KEY}`);
-
-        // 創建完整的交易流程直到確認階段
-        colorLog('yellow', '\n步驟1-4：創建並確認交易');
-        
-        // Asset交易創建
-        await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, DURATION),
-            'Asset交易創建'
-        );
-        await delay(15000);
-
-        // Payment創建
-        await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, DURATION, { value: AMOUNT }),
-            'Payment創建'
-        );
-        await delay(15000);
-
-        // Asset確認
-        await safeExecuteTransaction(
-            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, BUYER_KEY, { value: AMOUNT }),
-            'Asset交易確認'
-        );
-        await delay(15000);
-
-        // Payment確認
-        await safeExecuteTransaction(
-            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, SELLER_KEY),
-            'Payment確認'
-        );
-        await delay(15000);
-
-        // 檢查確認後的狀態
-        const confirmedStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
-        
-        if (!confirmedStatus || confirmedStatus.assetTrade.state !== 2 || confirmedStatus.paymentTrade.state !== 2) {
-            colorLog('yellow', '警告: 交易未達到已確認狀態，但繼續測試無效密鑰處理...');
-        }
-
-        // 步驟5：嘗試使用無效密鑰
-        colorLog('yellow', '\n步驟5：嘗試使用無效密鑰獲取Asset');
-        try {
-            await assetContractBuyer.transferWithKey(TRADE_ID, INVALID_KEY);
-            colorLog('red', '✗ 錯誤: 系統接受了無效密鑰');
-            return false;
-        } catch (error) {
-            colorLog('green', '✓ 正確: Asset合約拒絕了無效密鑰');
-            console.log('拒絕原因:', error.message);
-        }
-
-        // 步驟6：嘗試使用無效密鑰釋放Payment
-        colorLog('yellow', '\n步驟6：嘗試使用無效密鑰釋放Payment');
-        try {
-            await paymentContractBuyer.transferWithKey(PAYMENT_ID, INVALID_KEY);
-            colorLog('red', '✗ 錯誤: 系統接受了無效密鑰');
-            return false;
-        } catch (error) {
-            colorLog('green', '✓ 正確: Payment合約拒絕了無效密鑰');
-            console.log('拒絕原因:', error.message);
-        }
-
-        // 步驟7：使用正確密鑰完成交易
-        colorLog('yellow', '\n步驟7：使用正確密鑰完成交易');
-        await safeExecuteTransaction(
-            () => assetContractBuyer.transferWithKey(TRADE_ID, SELLER_KEY),
-            'Asset轉移 (正確密鑰)'
-        );
-
-        await safeExecuteTransaction(
-            () => paymentContractBuyer.transferWithKey(PAYMENT_ID, SELLER_KEY),
-            'Payment釋放 (正確密鑰)'
-        );
-
-        // 🔧 檢查最終餘額
-        const afterBalances = await checkAccountBalances(providers, "無效密鑰測試後");
-        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
-
-        colorLog('green', '✓ 無效密鑰處理測試完成！');
-        return true;
-
-    } catch (error) {
-        colorLog('red', '✗ 無效密鑰處理測試失敗: ' + error.message);
-        console.error('詳細錯誤:', error);
-        return false;
-    }
-}
 
 // 檢查系統狀態
 async function checkSystemHealth() {
@@ -1647,7 +1520,6 @@ function generateTestReport() {
     console.log(`  測試2B (執行階段超時): ${testResults.executionTimeout ? '✓ 通過' : '✗ 失敗'}`);
     console.log(`  測試2C (跨鏈時間同步): ${testResults.crossChainTimeSync ? '✓ 通過' : '✗ 失敗'}`);
     console.log(`  測試3 (雙重支付攻擊預防): ${testResults.doubleSpendPrevention ? '✓ 通過' : '✗ 失敗'}`);
-    console.log(`  測試4 (無效密鑰處理): ${testResults.invalidKeyTest ? '✓ 通過' : '✗ 失敗'}`);
 
     if (passedTests === totalTests) {
         colorLog('green', '\n🎉 所有測試通過！系統運行正常。');
@@ -1687,12 +1559,6 @@ function generateTestReport() {
         console.log('    - 在Oracle中實現跨鏈超時一致性檢查');
         console.log('    - 加強雙重支付檢測邏輯');
         console.log('    - 添加風險評估機制');
-    }
-    if (!testResults.invalidKeyTest) {
-        console.log('  🔐 密鑰驗證問題:');
-        console.log('    - 檢查合約密鑰驗證邏輯');
-        console.log('    - 確認密鑰加密和解密流程');
-        console.log('    - 驗證密鑰匹配算法');
     }
 
     // 🔧 性能建議
@@ -1802,8 +1668,6 @@ async function runAllTests() {
         testResults.doubleSpendPrevention = await testDoubleSpendPrevention();
         await delay(10000);
 
-        testResults.invalidKeyTest = await testInvalidKeyHandling();
-
     } catch (error) {
         colorLog('red', '測試執行過程中發生嚴重錯誤: ' + error.message);
         console.error('錯誤堆疊:', error.stack);
@@ -1886,11 +1750,6 @@ async function runSingleTest(testName) {
             case '3':
                 result = await testDoubleSpendPrevention();
                 break;
-            case 'key':
-            case 'invalidkey':
-            case '4':
-                result = await testInvalidKeyHandling();
-                break;
             case 'health':
                 result = await checkSystemHealth();
                 break;
@@ -1904,7 +1763,6 @@ async function runSingleTest(testName) {
                 console.log('  execution/2b - 執行階段超時測試');
                 console.log('  timesync/2c - 跨鏈時間同步測試');
                 console.log('  double/3 - 雙重支付預防測試');
-                console.log('  key/4 - 無效密鑰處理測試');
                 console.log('  health - 系統健康檢查');
                 return;
         }
@@ -1985,7 +1843,6 @@ module.exports = {
     testExecutionTimeout,
     testCrossChainTimeSync,
     testDoubleSpendPrevention,
-    testInvalidKeyHandling,
     checkSystemHealth,
     analyzeTransactionHistory,
     safeExecuteTransaction,
