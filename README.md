@@ -1,562 +1,380 @@
-# AssetChain 和 Timer_oracle 系統介紹
+# 跨鏈原子交換時間Oracle系統
 
-## 智能合約：AssetChain（ 以在以太坊運行的 HTLC 為例 ）
+一個基於以太坊的跨鏈原子交換（Atomic Swap）系統，具備時間Oracle服務、防雙重支付攻擊和完整超時保護機制。
 
-### 時序圖
+## 🌟 專案特色
+
+- **🔗 跨鏈原子交換**: 支援Asset鏈和Payment鏈之間的安全資產交換
+- **⏰ 時間Oracle服務**: 提供準確的時間戳管理和超時監控
+- **🛡️ 雙重支付防護**: 即時檢測並阻止雙重支付攻擊
+- **🔒 多階段超時保護**: 完整的超時處理機制，確保資金安全
+- **🧪 全面測試套件**: 包含壓力測試、超時測試和安全性測試
+
+## 📁 專案結構
+
+```
+contractTimeSender/
+├── contract/                    # 智能合約
+│   ├── assetContract.sol       # 資產交易合約
+│   └── paymentContract.sol     # 支付交易合約
+├── backend/                     # 後端服務
+│   ├── server.js               # 主要Oracle服務器
+│   ├── services/
+│   │   └── logger.js           # 日誌記錄服務
+│   └── test/                   # 測試套件
+│       ├── autoTest.js         # 自動化測試
+│       ├── stressTest.js       # 壓力測試
+│       ├── run_timeout_tests.js # 超時測試
+│       ├── TIMEOUT_TESTS_README.md
+│       └── TIMEOUT_FIXES_SUMMARY.md
+├── script/
+│   └── test.sh                 # 測試執行腳本
+├── package.json
+└── README.md
+```
+
+## 🏗️ 系統架構
+
+### 智能合約層
+
+#### AssetContract.sol
+負責資產鏈的交易管理：
+- 交易生命週期管理（Initiated → AwaitingConfirmation → Confirmed → Completed/Failed）
+- 密鑰驗證和資產轉移
+- 防重入攻擊保護
+- 超時自動退款機制
+
+#### PaymentContract.sol
+負責支付鏈的交易管理：
+- 支付確認和管理
+- 跨鏈交易關聯（assetTradeId）
+- 自動退款保護
+- 執行階段超時處理
+
+### Oracle服務層
+
+#### 核心功能
+- **事件監聽**: 實時監聽兩條鏈的`TimeRequestSent`事件
+- **時間戳管理**: 提供準確的時間戳給智能合約
+- **跨鏈同步**: 協調Asset和Payment鏈的交易狀態
+- **風險檢測**: 即時檢測雙重支付和時間同步風險
+
+#### 防護機制
+```javascript
+// 雙重支付檢測
+async function performImmediateDoubleSpendCheck(assetTradeId, paymentId, assetDuration, paymentDuration) {
+    if (assetDuration < paymentDuration) {
+        // 立即取消交易，防止攻擊
+        await cancelBothTrades(assetTradeId, paymentId);
+    }
+}
+```
+
+## 🔄 交易流程
+
 ```mermaid
 sequenceDiagram
-    participant Buyer as Buyer (買方)
-    participant AssetChain as AssetChain Contract
-    participant Oracle as Oracle Service
-    participant Seller as Seller (賣方)
+    participant B as Buyer (買家)
+    participant AC as AssetContract
+    participant O as Oracle Service
+    participant PC as PaymentContract
+    participant S as Seller (賣家)
 
-    Note over Buyer,Seller: 交易初始階段
-    Buyer->>AssetChain: inceptTrade()
-    Note right of Buyer: 買方發起交易:<br/>1. 設定交易ID、金額、賣方地址<br/>2. 設定加密後的密鑰<br/>3. 設定交易有效期限
+    Note over B,S: 🚀 跨鏈原子交換流程
+    
+    B->>AC: 1. inceptTrade()
+    AC->>O: TimeRequestSent Event
+    O->>AC: fulfillTime() - 設定開始時間
+    
+    B->>PC: 2. inceptPayment() + 資金
+    PC->>O: TimeRequestSent Event  
+    O->>PC: fulfillTime() - 設定開始時間
+    
+    Note over B,S: 🔍 雙重支付檢測
+    O->>O: 檢測Asset/Payment時間差異
+    
+    S->>AC: 3. confirmTrade() + 資金
+    AC->>O: TimeRequestSent Event
+    O->>AC: fulfillTime() - 確認時間
+    
+    B->>PC: 4. confirmPayment()
+    PC->>O: TimeRequestSent Event
+    O->>PC: fulfillTime() - 確認時間
+    
+    Note over B,S: 🔑 密鑰揭示階段
+    B->>PC: 5. transferWithKey() - 揭示賣家密鑰
+    PC->>S: 支付轉移給賣家
+    
+    S->>AC: 6. transferWithKey() - 使用密鑰
+    AC->>B: 資產轉移給買家
+    
+    Note over B,S: ✅ 交易完成
 
-    AssetChain->>Oracle: TimeRequestSent
-    Note right of AssetChain: 合約發出時間請求事件:<br/>1. 生成唯一requestId<br/>2. 記錄交易初始狀態
-
-    Oracle->>AssetChain: fulfillTime()
-    Note right of Oracle: Oracle回應時間請求:<br/>1. 提供當前時間戳<br/>2. 設定交易inception時間<br/>3. 將狀態改為AwaitingConfirmation
-
-    AssetChain->>Seller: TradeInitiated
-    Note right of AssetChain: 通知賣方交易已初始化:<br/>1. 等待賣方確認<br/>2. 開始計算時效
-
-    Note over Buyer,Seller: 交易確認階段
-    Seller->>AssetChain: confirmTrade()
-    Note right of Seller: 賣方確認交易:<br/>1. 存入相應金額<br/>2. 提供加密後的買方密鑰<br/>3. 檢查交易參數
-
-    AssetChain->>Oracle: TimeRequestSent
-    Note right of AssetChain: 再次請求時間確認:<br/>1. 檢查是否在有效期內<br/>2. 更新交易狀態
-
-    Oracle->>AssetChain: fulfillTime()
-    Note right of Oracle: Oracle確認時間:<br/>1. 提供確認時間戳<br/>2. 檢查是否在有效期內<br/>3. 設定confirmationTime
-
-    AssetChain->>Buyer: TradeConfirmed
-    Note right of AssetChain: 通知買方交易已確認:<br/>1. 等待買方提供密鑰<br/>2. 繼續監控時效
-
-    Note over Buyer,Seller: 交易完成/失敗階段
-    Buyer->>AssetChain: transferWithKey()
-    Note right of Buyer: 買方提供密鑰:<br/>1. 驗證密鑰正確性<br/>2. 檢查是否在有效期內
-
-    alt Key is correct
-        AssetChain->>Buyer: TradeCompleted (transfer funds)
-        Note right of AssetChain: 交易成功完成:<br/>1. 轉移資金給買方<br/>2. 更新狀態為Completed
-    else Key is incorrect
-        AssetChain->>Seller: TradeFailed (return funds)
-        Note right of AssetChain: 交易失敗:<br/>1. 退還資金給賣方<br/>2. 更新狀態為Failed
-    end
-
-    loop Every 30 seconds
-        Oracle->>AssetChain: checkAndHandleExpiredTrades()
-        Note right of Oracle: 定期檢查過期交易:<br/>1. 檢查時效是否超過<br/>2. 處理過期交易
-        alt Trade expired
-            AssetChain->>Seller: TradeFailed (return funds)
-            Note right of AssetChain: 處理過期交易:<br/>1. 自動退還資金給賣方<br/>2. 更新狀態為Failed
+    loop 每30秒
+        O->>O: checkAndHandleExpiredTrades()
+        alt 交易超時
+            O->>AC: handleFailedConfirmation()
+            O->>PC: handleFailedConfirmation()
+            AC->>S: 退款給賣家
+            PC->>B: 退款給買家
         end
     end
 ```
 
-### 合約結構
+## 🛡️ 安全機制
 
-1. **狀態變數**：
-   ```solidity
-   address private oracle;
-   mapping(uint => Trade) public trades;
-   mapping(bytes32 => uint) private requestToTradeId;
-   uint[] public tradeIds;
-   ```
-   
-   詳細解釋：
-   - `oracle`：儲存 Time Oracle 服務的以太坊地址。這個地址有權限執行某些特定的函數。
-   - `trades`：一個 mapping，用交易 ID 作為 key，儲存 `Trade` 結構裡面。可以快速查詢和更新特定交易的詳細資訊。
-   - `requestToTradeId`：將 Oracle 請求的 ID mapping 到交易 ID。可以讓 Oracle 快速找到相對應的交易。
-   - `tradeIds`：儲存所有 active （還沒完成或尚未失敗取消）交易 ID 的 list。可以找到所有交易。
+### 1. 多階段超時保護
 
-2. **交易結構**：
-   ```solidity
-   struct Trade {
-       uint id;
-       uint256 amount;
-       address payable buyer;
-       address payable seller;
-       string keyEncryptedSeller;
-       string keyEncryptedBuyer;
-       uint256 inceptionTime;
-       uint256 confirmationTime;
-       uint256 duration;
-       uint256 lastOracleUpdate;
-       TradeState state;
-   }
-   ```
-   
-   詳細解釋：
-   - `id`：交易的唯一 primary key。
-   - `amount`：交易金額 (wei)。
-   - `buyer` 和 `seller`：買家和賣家的以太坊地址。設置為 `payable` 以允許發送以太幣至合約。
-   - `keyEncryptedSeller` 和 `keyEncryptedBuyer`：加密的秘密，原本跨鏈的 HTLC 用於交易的確認。
-   - `inceptionTime` 和 `confirmationTime`：交易開始和確認的時間戳。
-   - `duration`：交易的有效期限（秒）。
-   - `lastOracleUpdate`：交易的最後存入的時間戳。
-   - `state`：交易的當前狀態，使用 `TradeState`。
+#### 創建階段超時（Timeout 1）
+- **觸發條件**: 創建交易後長期無後續操作
+- **保護措施**: Oracle自動取消交易並退款
+- **測試覆蓋**: `testTimeoutRefund`
 
-3. **Enum 枚舉**：
-   ```solidity
-   enum TradeState { Initiated, AwaitingConfirmation, Confirmed, Completed, Failed }
-   ```
-   
-   詳細解釋：
-   - `Initiated`：交易已初始化，但尚未得到 Oracle 的時間確認。
-   - `AwaitingConfirmation`：等待賣家確認交易。
-   - `Confirmed`：賣家已確認交易，等待買家提供 key。
-   - `Completed`：交易成功完成。
-   - `Failed`：交易因某種原因失敗（如超時或密鑰錯誤）。
+#### 確認階段超時（Timeout 2A）
+- **觸發條件**: 部分確認後另一方超時
+- **保護措施**: 回滾已確認交易，取消未確認交易
+- **測試覆蓋**: `testConfirmationTimeout`
 
-### 主要功能
+#### 執行階段超時（Timeout 2B）
+- **觸發條件**: 雙方確認但未執行密鑰揭示
+- **保護措施**: 強制退款，避免資金永久鎖定
+- **測試覆蓋**: `testExecutionTimeout`
 
-1. **inceptTrade**：
-   ```solidity
-   function inceptTrade(uint id, uint256 amount, address payable seller, string memory keyEncryptedSeller, uint256 duration) public {
-       require(trades[id].id == 0, "Trade ID already exists");
-       trades[id] = Trade(id, amount, payable(msg.sender), seller, keyEncryptedSeller, "", 0, 0, duration, 0, TradeState.Initiated);
-       tradeIds.push(id);
-       
-       bytes32 requestId = keccak256(abi.encodePacked(block.timestamp, id));
-       requestToTradeId[requestId] = id;
-       emit TradeInitiated(id, amount, msg.sender, seller, duration);
-       emit TimeRequestSent(requestId, id, duration);
-   }
-   ```
-   
-   詳細解釋：
-   - 首先檢查給定的 ID 是否已存在，如果存在則拋出錯誤。
-   - 創建一個新的 `Trade` 結構，設置初始時間戳記為 `lastOracleUpdate = 0` 、狀態為 `Initiated`。
-   - 將新的交易 ID 添加到 `tradeIds` list 裡面。
-   - 生成一個唯一的 `requestId`，用於 Oracle 請求。這裡使用當前時間戳和交易 ID 的組合來確保唯一性。
-   - 將 `requestId` mapping 到交易 ID，以便後續處理。
-   - 觸發 `TradeInitiated` 事件，通知前端( 未來可能會需要一個 )或其他監聽者交易已創建。
-   - 觸發 `TimeRequestSent` 事件，請求 Oracle 服務提供時間戳。
+### 2. 雙重支付防護
 
-2. **confirmTrade**：
-   ```solidity
-   function confirmTrade(uint id, uint256 amount, address payable buyer, string memory keyEncryptedBuyer) public payable {
-       require(trades[id].id != 0, "Trade ID does not exist");
-       require(trades[id].seller == msg.sender, "Only the seller can confirm the trade");
-       require(trades[id].buyer == buyer, "Buyer address does not match");
-       require(trades[id].amount == amount, "Amount does not match");
-       require(msg.value == amount, "Incorrect deposit amount");
-       require(trades[id].state == TradeState.AwaitingConfirmation, "Trade is not in the correct state");
-
-       trades[id].keyEncryptedBuyer = keyEncryptedBuyer;
-       trades[id].state = TradeState.Confirmed;
-       
-       bytes32 requestId = keccak256(abi.encodePacked(block.timestamp, id));
-       requestToTradeId[requestId] = id;
-       emit TradeConfirmationReceived(id, amount, msg.sender);
-       emit TimeRequestSent(requestId, id, trades[id].duration);
-       emit TradeConfirmed(id);
-   }
-   ```
-   
-   詳細解釋：
-   - 進行一系列的檢查，確保：
-     1. 交易存在
-     2. 調用這個 function 的是賣家
-     3. 買家地址是否匹配
-     4. 確認金額是否正確
-     5. 確認賣家是否存入了正確的金額
-     6. 交易處於正確的狀態（等待確認）
-   - 更新交易資訊，設置買家的加密密鑰並將狀態更改為 `Confirmed`。
-   - 生成新的 `requestId` 並建立 mapping。
-   - 觸發多個事件：
-     1. `TradeConfirmationReceived`：通知系統賣家已確認交易。
-     2. `TimeRequestSent`：再次請求 Oracle 提供時間戳。
-     3. `TradeConfirmed`：請求時間戳之後再次通知系統交易已被確認。
-
-3. **fulfillTime**：
-   ```solidity
-   function fulfillTime(bytes32 _requestId, uint256 _timestamp) external onlyOracle {
-       uint tradeId = requestToTradeId[_requestId];
-       require(tradeId != 0, "Invalid request ID");
-       
-       Trade storage trade = trades[tradeId];
-       require(trade.state != TradeState.Completed && trade.state != TradeState.Failed, "Trade already completed or failed");
-
-       emit TimeRequestFulfilled(tradeId, _timestamp);
-       
-       trade.lastOracleUpdate = _timestamp; 
-       
-       if (trade.inceptionTime == 0) {
-           trade.inceptionTime = _timestamp;
-           trade.state = TradeState.AwaitingConfirmation;
-       } else if (trade.state == TradeState.Confirmed) {
-           trade.confirmationTime = _timestamp;
-           if (_timestamp - trade.inceptionTime <= trade.duration) {
-               emit TradeCompletionAttempted(tradeId, true, "Within time limit");
-           } else {
-               emit TradeCompletionAttempted(tradeId, false, "Time limit exceeded");
-               failTrade(tradeId, "Time limit exceeded");
-           }
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 這個函數只能由 Oracle 調用（由 `onlyOracle` 保證）。
-   - 首先，通過 `requestId` 找到對應的交易 ID。
-   - 檢查交易是否存在且尚未完成或失敗。
-   - 觸發 `TimeRequestFulfilled` 事件，表示 Oracle 已提供時間戳。
-   - `trade.lastOracleUpdate = _timestamp;` 更新 time stamp
-   - 根據交易的當前狀態進行不同的處理：
-     1. 如果 `inceptionTime` 為 0（首次設置時間），設置交易開始時間並將狀態更改為 `AwaitingConfirmation`。
-     2. 如果交易狀態為 `Confirmed`，設置確認時間並檢查是否在有效期內：
-        - 如果在有效期內，觸發 `TradeCompletionAttempted` 事件（成功）。
-        - 如果超出有效期，觸發 `TradeCompletionAttempted` 事件（失敗）並調用 `failTrade` 函數。
-        - ```solidity
-            function failTrade(uint id, string memory reason) internal {
-                Trade storage trade = trades[id];
-                require(trade.state != TradeState.Completed && trade.state != TradeState.Failed, "Trade already completed or failed");
-
-                // 如果交易已確認且賣家已存入資金，則退回資金
-                if (trade.state == TradeState.Confirmed) {
-                    uint256 amountToReturn = trade.amount;
-                    trade.amount = 0; // 防止重入攻擊
-                    (bool sent, ) = trade.seller.call{value: amountToReturn}("");
-                    if (sent) {
-                        emit AssetReturned(id, trade.seller, amountToReturn);
-                    } else {
-                        trade.amount = amountToReturn; // 如果退款失敗，恢復金額
-                        emit AssetReturned(id, trade.seller, 0);
-                    }
-                    require(sent, "Failed to return asset to seller");
-                }
-
-                trade.state = TradeState.Failed;
-                emit TradeFailed(id, reason);
-                removeTrade(id);
-            }
-            ```
-            
-        - 重入攻擊是指攻擊者在接收以太幣的過程中，利用回調函數（fallback function）重複調用發送方的函數，在狀態更新前重複提取資金的攻擊方式。
-            - 2016 年的 DAO 攻擊就是一個著名的重入攻擊案例，導致了約 6000 萬美元的損失，最終引發了以太坊的硬分叉。
-
-4. **transferWithKey**：
-   ```solidity
-   function transferWithKey(uint id, string memory key) public {
-       require(trades[id].state == TradeState.Confirmed, "Trade is not in the correct state");
-       require(trades[id].buyer == msg.sender, "Only the buyer can initiate the transfer");
-       require(trades[id].confirmationTime != 0, "Confirmation time not set");
-       require(trades[id].lastOracleUpdate - trades[id].confirmationTime <= trades[id].duration, "Trade duration exceeded");
-       
-       Trade storage trade = trades[id];
-
-       if (keccak256(abi.encodePacked(key)) == keccak256(abi.encodePacked(trade.keyEncryptedSeller))) {
-           completeTrade(id);
-       } else {
-           failTrade(id, "Invalid key provided");
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 首先進行一系列檢查：
-     1. 確保交易狀態為 `Confirmed`。
-     2. 確保調用者是買家。
-     3. 確保確認時間已設置。
-     4. 確保當前時間在交易有效期內。
-   - 比較買家提供的密鑰與存儲的加密賣家密鑰是否匹配：
-     - 如果匹配，調用 `completeTrade` 函數完成交易。
-     - 如果不匹配，調用 `failTrade` 函數使交易失敗。
-
-## Oracle 服務：Node.js 應用程式
-
-### 主要功能
-
-1. **初始化**：
-   ```javascript
-   async function initializeEthers() {
-       provider = new ethers.JsonRpcProvider(ETHEREUM_NODE_URL);
-       signer = new ethers.Wallet(PRIVATE_KEY, provider);
-       contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, signer);
-       lastProcessedBlock = await provider.getBlockNumber();
-       currentNonce = await provider.getTransactionCount(signer.address);
-       log(`Initialized with contract: ${CONTRACT_ADDRESS}`);
-   }
-   ```
-   
-   詳細解釋：
-   - 創建一個 `JsonRpcProvider` ，用於與以太坊節點通信。
-       - `ETHEREUM_NODE_URL="https://1rpc.io/sepolia"`
-   - 使用私鑰創建一個 `Wallet` ，這將用於簽署交易。（我有存私鑰在 `.env` 裡面）
-   - 創建一個變數並提供合約地址，存在 `.env` 裡面。
-   - 獲取最新的區塊號碼，用於後續定時獲取事件。
-   - 獲取當前的 [nonce（交易計數器）](https://hackmd.io/@CryptoPoYang/BJMQcx4e1e)，用於發送交易，且確保不要重複發送。
-   - 記錄初始化完成的資訊。
-
-2. **事件監聽**：
-   ```javascript
-   async function pollEvents() {
-       try {
-           const latestBlock = await provider.getBlockNumber();
-           if (latestBlock <= lastProcessedBlock) {
-               return; // No new blocks
-           }
-
-           log(`Checking for events from block ${lastProcessedBlock + 1} to ${latestBlock}`);
-
-           const filter = contract.filters.TimeRequestSent();
-           const events = await contract.queryFilter(filter, lastProcessedBlock + 1, latestBlock);
-
-           for (const event of events) {
-               const { requestId, tradeId, duration } = event.args;
-               const eventTimestamp = (await event.getBlock()).timestamp;
-               log(`Received TimeRequestSent event for trade ${tradeId}`);
-               if (!processingTrades.has(tradeId.toString())) {
-                   handleTimeRequest(requestId, tradeId.toString(), duration, eventTimestamp)
-                       .catch(error => log(`Error processing event: ${error.message}`));
-               } else {
-                   eventQueue.push({ requestId, tradeId: tradeId.toString(), duration, eventTimestamp });
-                   log(`Trade ${tradeId} is being processed, event queued`);
-               }
-           }
-
-           lastProcessedBlock = latestBlock;
-       } catch (error) {
-           log(`Error polling events: ${error.message}`);
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 獲取最新的區塊號碼，檢查是否有新的區塊。
-   - 如果有新區塊，創建一個事件過濾器來查找 `TimeRequestSent` 事件。
-   - 使用 `queryFilter` 獲取指定區塊範圍內的所有相關事件。
-   - 對每個事件：
-     1. 解構事件變數，獲取 `requestId`、`tradeId` 和 `duration`。
-     2. 獲取事件所在區塊的時間戳。
-     3. 檢查該交易是否正在處理中：
-        - 如果不在處理中，調用 `handleTimeRequest` 函數處理事件。
-        - 如果正在處理中，將事件添加到 queue 中等待後續處理。
-   - 更新最後處理的區塊號碼。
-
-3. **時間戳管理**：
-   ```javascript
-   async function handleTimeRequest(requestId, tradeId, duration, eventTimestamp) {
-       if (processingTrades.has(tradeId)) {
-           log(`Trade ${tradeId} is currently being processed, queueing this request`);
-           eventQueue.push({ requestId, tradeId, duration, eventTimestamp });
-           return;
-       }
-
-       processingTrades.add(tradeId);
-       
-       try {
-           const currentTime = Math.floor(Date.now() / 1000);
-           
-           if (!trades.has(tradeId)) {
-               trades.set(tradeId, { 
-                   inceptionTime: eventTimestamp, 
-                   duration: Number(duration),
-                   lastRequestId: requestId,
-                   lastRequestTime: eventTimestamp
-               });
-               await fulfillTime(requestId, eventTimestamp);
-               log(`Inception time set for trade ${tradeId}`);
-           } else {
-               const trade = trades.get(tradeId);
-               if (currentTime - trade.inceptionTime <= trade.duration) {
-                   trade.lastRequestId = requestId;
-                   trade.lastRequestTime = eventTimestamp;
-                   await fulfillTime(requestId, eventTimestamp);
-                   log(`Confirmation time set for trade ${tradeId}`);
-               } else {
-                   await handleFailedConfirmation(tradeId);
-                   log(`Failed confirmation for trade ${tradeId} due to exceeded duration`);
-                   trades.delete(tradeId);
-               }
-           }
-       } catch (error) {
-           log(`Error processing trade ${tradeId}: ${error.message}`);
-       } finally {
-           processingTrades.delete(tradeId);
-           processNextEvent();
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 首先檢查該交易是否正在處理中。如果是，將請求加入 queue 就離開此函數。
-   - 將交易標記為正在處理中。
-   - 獲取當前時間戳。
-   - 檢查交易是否已存在於本地記錄中：
-     - 如果不存在，創建新的交易記錄，設置初始時間，並調用 `fulfillTime` 函數更新智能合約。
-     - 如果已存在：
-       - 檢查是否在有效期內。如果是，更新最後請求資訊並調用 `fulfillTime`。
-       - 如果超出有效期，調用 `handleFailedConfirmation` 處理失敗的交易。
-   - 無論處理結果如何，最後都會從處理中列表移除該交易，並處理 queue 中的下一個事件。
-
-### 錯誤處理和重試機制
-
-1. **Nonce 管理**：
-   ```javascript
-   async function fulfillTime(requestId, timestamp) {
-       try {
-           const tx = await contract.fulfillTime(requestId, timestamp, {
-               nonce: currentNonce++,
-               gasLimit: 200000 // Adjust as needed
-           });
-           await tx.wait();
-           log(`Fulfilled time for request ${requestId}`);
-       } catch (error) {
-           if (error.message.includes('nonce too low')) {
-               currentNonce = await provider.getTransactionCount(signer.address);
-               log(`Nonce reset to ${currentNonce}`);
-               // Retry the transaction
-               return fulfillTime(requestId, timestamp);
-           }
-           throw error;
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 嘗試調用智能合約的 `fulfillTime` 函數，提供 `requestId` 和 `timestamp`。
-   - 使用當前的 `nonce` 值發送交易，並在發送後遞增 `nonce`。
-   - 設置 `gasLimit` 以確保交易有足夠的 gas 執行。
-   - 等待交易被確認（`tx.wait()`）。
-   - 如果遇到 "nonce too low" 錯誤（可能由於其他交易導致 nonce 不同步）：
-     - 從區塊鏈獲取最新的 nonce 值。
-     - 遞迴調用 `fulfillTime` 函數重試交易。
-   - 其他錯誤則拋出異常。
-
-2. **隊列處理**：
-   ```javascript
-   function processNextEvent() {
-       if (eventQueue.length > 0) {
-           const nextEvent = eventQueue.shift();
-           handleTimeRequest(nextEvent.requestId, nextEvent.tradeId, nextEvent.duration, nextEvent.eventTimestamp)
-               .catch(error => log(`Error processing queued event: ${error.message}`));
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 檢查事件隊列是否有待處理的事件。
-   - 如果有，從隊列中取出第一個事件（使用 `shift()` 方法）。
-   - 調用 `handleTimeRequest` 函數處理該事件。
-   - 如果處理過程中發生錯誤，記錄錯誤資訊但不中斷程序執行。
-
-3. **定期檢查過期交易（願景但尚未測試）**：
-   ```javascript
-   async function checkAndHandleExpiredTrades() {
-       const currentTime = Math.floor(Date.now() / 1000);
-       for (const [tradeId, trade] of trades.entries()) {
-           if (currentTime - trade.inceptionTime > trade.duration && !processingTrades.has(tradeId)) {
-               processingTrades.add(tradeId);
-               try {
-                   await handleFailedConfirmation(tradeId);
-                   log(`Handled expired trade ${tradeId}`);
-                   trades.delete(tradeId);
-               } catch (error) {
-                   log(`Error handling expired trade ${tradeId}: ${error.message}`);
-               } finally {
-                   processingTrades.delete(tradeId);
-               }
-           }
-       }
-   }
-   ```
-   
-   詳細解釋：
-   - 獲取當前時間戳。
-   - 遍歷所有記錄的交易。
-   - 對於每個交易，檢查是否已過期（當前時間減去開始時間大於持續時間）且不在處理中。
-   - 如果交易過期：
-     - 將交易標記為處理中。
-     - 調用 `handleFailedConfirmation` 函數處理失敗的交易。
-     - 從本地記錄中刪除該交易。
-   - 無論處理是否成功，最後都從處理中列表移除該交易。
-
-## 系統整合
-
-智能合約和 Oracle 服務通過以下方式進行交互：
-
-1. **事件監聽**：Oracle 服務通過 `pollEvents` 函數定期檢查智能合約發出的 `TimeRequestSent` 事件。
-
-2. **時間戳更新**：Oracle 服務通過調用智能合約的 `fulfillTime` 函數來更新交易的時間戳。
-
-3. **失敗處理**：對於過期或失敗的交易，Oracle 服務調用智能合約的 `handleFailedConfirmation` 函數。
-
-4. **並發控制**：Oracle 服務使用本地的 `processingTrades` 集合和 `eventQueue` 隊列來管理並發請求，確保每個交易都被正確處理。
-
-5. **錯誤恢復**：通過 nonce 管理和重試機制，Oracle 服務能夠處理由於網絡延遲或其他原因導致的交易失敗。
-
-## 結論
-
-AssetChain 和其配套的 Oracle 服務共同構建了一個去中心化的資產交易系統。通過智能合約確保交易的安全性和透明度，同時利用 Oracle 服務提供必要的鏈下數據和邏輯處理。
-
-1. **智能合約（AssetChain）** 負責：
-   - 定義交易結構和狀態
-   - 實現核心業務邏輯（如交易初始化、確認和完成）
-   - 管理交易的生命週期
-   - 發出事件以通知外部系統
-
-2. **Oracle 服務**負責：
-   - 監聽智能合約事件
-   - 提供準確的時間戳資訊
-   - 處理交易的時間相關邏輯
-   - 管理並發和錯誤恢復
-
-## 有成功的 log 
-
-
-```log=
-> contracttimesender@1.0.0 start
-> node server_new.js
-
-2024-10-21T16:02:41.133Z - Initialized with contract: 0x8e7B8A5b4AC4103C6FF2eaFf096043712f78BCCF
-2024-10-21T16:02:41.146Z - Server running on port 3000
-2024-10-21T16:02:55.408Z - Checking for events from block 6917212 to 6917212
-2024-10-21T16:03:10.460Z - Checking for events from block 6917213 to 6917214
-2024-10-21T16:03:11.597Z - Received TimeRequestSent event for trade 12
-2024-10-21T16:03:25.395Z - Checking for events from block 6917215 to 6917215
-2024-10-21T16:03:40.415Z - Checking for events from block 6917216 to 6917216
-2024-10-21T16:04:03.501Z - Fulfilled time for request 0x39a5b882edc1ec1c36affced7111fc24d98d5cfb396c8015c609f71427aa8661
-2024-10-21T16:04:03.501Z - Inception time set for trade 12
-2024-10-21T16:04:10.404Z - Checking for events from block 6917217 to 6917218
-2024-10-21T16:04:25.399Z - Checking for events from block 6917219 to 6917219
-2024-10-21T16:04:38.730Z - Handled failed confirmation for trade 12
-2024-10-21T16:04:38.731Z - Handled expired trade 12
-2024-10-21T16:04:40.404Z - Checking for events from block 6917220 to 6917220
-2024-10-21T16:04:56.076Z - Checking for events from block 6917221 to 6917221
+```javascript
+// 關鍵檢測邏輯
+if (assetDuration < paymentDuration) {
+    logger('error', '🚨 檢測到雙重支付風險');
+    // 立即取消兩個交易
+    await handleAssetFailedConfirmation(assetTradeId);
+    await handlePaymentFailedConfirmation(paymentId);
+}
 ```
 
-```log=
-> contracttimesender@1.0.0 start
-> node server_new.js
+### 3. 重入攻擊防護
 
-2024-10-21T16:05:47.868Z - Initialized with contract: 0x8e7B8A5b4AC4103C6FF2eaFf096043712f78BCCF
-2024-10-21T16:05:47.883Z - Server running on port 3000
-2024-10-21T16:06:02.254Z - Checking for events from block 6917226 to 6917228
-2024-10-21T16:06:17.224Z - Checking for events from block 6917229 to 6917229
-2024-10-21T16:06:18.453Z - Received TimeRequestSent event for trade 12
-2024-10-21T16:07:02.233Z - Checking for events from block 6917230 to 6917230
-2024-10-21T16:07:09.161Z - Fulfilled time for request 0x18aa4f3c9ed2cf3ab5efa388498050bde776b06894200491d33bb53294d3bdeb
-2024-10-21T16:07:09.161Z - Inception time set for trade 12
-2024-10-21T16:07:17.237Z - Checking for events from block 6917231 to 6917231
-2024-10-21T16:07:32.220Z - Checking for events from block 6917232 to 6917232
-2024-10-21T16:07:34.325Z - Received TimeRequestSent event for trade 12
-2024-10-21T16:07:47.797Z - Checking for events from block 6917233 to 6917233
-2024-10-21T16:07:57.297Z - Fulfilled time for request 0x074971605e8cc4c0366b1f969519f3adbcf55fb6cd6b4e0c7e1da2f09cfd4ed6
-2024-10-21T16:07:57.297Z - Confirmation time set for trade 12
-2024-10-21T16:08:02.320Z - Checking for events from block 6917234 to 6917234
-2024-10-21T16:08:17.224Z - Checking for events from block 6917235 to 6917235
-2024-10-21T16:08:32.284Z - Checking for events from block 6917236 to 6917237
-2024-10-21T16:08:47.213Z - Checking for events from block 6917238 to 6917238
-2024-10-21T16:09:02.251Z - Checking for events from block 6917239 to 6917239
-2024-10-21T16:09:33.179Z - Checking for events from block 6917240 to 6917240
-2024-10-21T16:09:38.830Z - Error handling expired trade 12: transaction execution reverted (action="sendTransaction", data=null, reason=null, invocation=null, revert=null, transaction={ "data": "", "from": "0x996c7C5F6626adF15A5fcA4f7f5B6550Cd2e00E2", "to": "0x8e7B8A5b4AC4103C6FF2eaFf096043712f78BCCF" }, receipt={ "_type": "TransactionReceipt", "blobGasPrice": null, "blobGasUsed": null, "blockHash": "0x1013a265abc5abebd32541143e21dac2d87233f2347d442b8c1ab72eaf7283d4", "blockNumber": 6917241, "contractAddress": null, "cumulativeGasUsed": "11867496", "from": "0x996c7C5F6626adF15A5fcA4f7f5B6550Cd2e00E2", "gasPrice": "3490324116", "gasUsed": "26257", "hash": "0xfc20621786207374b9539ea0eedc0bb829cf5832cb6115e1790bed75f086d5b4", "index": 64, "logs": [  ], "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "root": null, "status": 0, "to": "0x8e7B8A5b4AC4103C6FF2eaFf096043712f78BCCF" }, code=CALL_EXCEPTION, version=6.13.3)
-2024-10-21T16:09:47.224Z - Checking for events from block 6917241 to 6917242
-2024-10-21T16:10:02.251Z - Checking for events from block 6917243 to 6917243
+```solidity
+// 防重入攻擊模式
+uint256 amountToReturn = trade.amount;
+trade.amount = 0; // 先清零防止重入
+(bool sent, ) = trade.seller.call{value: amountToReturn}("");
+require(sent, "Failed to return funds");
 ```
+
+## 🚀 快速開始
+
+### 環境要求
+
+- Node.js >= 16.0.0
+- npm >= 7.0.0
+- 以太坊測試網路節點（如 Sepolia）
+
+### 安裝步驟
+
+1. **克隆專案**
+```bash
+git clone <repository-url>
+cd contractTimeSender
+```
+
+2. **安裝依賴**
+```bash
+npm install
+```
+
+3. **配置環境變數**
+```bash
+# 複製環境變數範本
+cp .env.example .env
+
+# 編輯環境變數
+vim .env
+```
+
+環境變數設定：
+```env
+# Asset Chain Configuration
+ASSET_CONTRACT_ADDRESS=0x...
+ASSET_ETHEREUM_NODE_URL=https://1rpc.io/sepolia
+ASSET_PRIVATE_KEY=0x...
+
+# Payment Chain Configuration  
+PAYMENT_CONTRACT_ADDRESS=0x...
+PAYMENT_ETHEREUM_NODE_URL=https://1rpc.io/sepolia
+PAYMENT_PRIVATE_KEY=0x...
+```
+
+4. **部署智能合約**
+```bash
+# 編譯合約
+solc --abi --bin contract/assetContract.sol -o build/
+solc --abi --bin contract/paymentContract.sol -o build/
+
+# 部署到測試網路（請參考您的部署工具）
+```
+
+5. **啟動Oracle服務**
+```bash
+npm start
+# 或
+node backend/server.js
+```
+
+## 🧪 測試套件
+
+### 使用測試腳本
+
+```bash
+# 使用互動式測試腳本
+./script/test.sh
+
+# 選項：
+# 1) 單一交易測試
+# 2) 壓力測試  
+# 3) 啟動監聽服務器
+```
+
+### 直接運行測試
+
+```bash
+# 完整自動化測試
+node backend/test/autoTest.js
+
+# 壓力測試
+node backend/test/stressTest.js
+
+# 專門的超時測試
+node backend/test/run_timeout_tests.js all
+```
+
+### 測試類型
+
+#### 1. 基本功能測試
+```bash
+node backend/test/autoTest.js balance  # 餘額檢查
+node backend/test/autoTest.js health   # 系統健康檢查
+```
+
+#### 2. 超時測試套件
+```bash
+node backend/test/run_timeout_tests.js basic        # 基本超時測試
+node backend/test/run_timeout_tests.js confirmation # 確認階段超時
+node backend/test/run_timeout_tests.js execution    # 執行階段超時
+node backend/test/run_timeout_tests.js timesync     # 跨鏈時間同步
+```
+
+#### 3. 壓力測試
+```bash
+node backend/test/stressTest.js  # 多並發交易測試
+```
+
+## 📊 測試報告範例
+
+```
+🔧 跨鏈原子交換測試結果
+================================================================================
+
+📊 測試摘要:
+  總測試數: 8
+  通過測試: 8  
+  失敗測試: 0
+  
+🛡️ 安全機制驗證:
+  ✅ 雙重支付防護: 通過
+  ✅ 重入攻擊防護: 通過  
+  ✅ 超時保護機制: 通過
+  ✅ 跨鏈狀態同步: 通過
+
+⏱️ 超時測試結果:
+  ✅ 創建階段超時: 90秒內正確退款
+  ✅ 確認階段超時: 120秒內正確回滾
+  ✅ 執行階段超時: 150秒內強制退款
+  ✅ 跨鏈時間同步: 檢測30秒以上時間差
+
+💰 資金安全驗證:
+  ✅ 測試前總餘額: 1.000 ETH
+  ✅ 測試後總餘額: 0.998 ETH (扣除Gas費)
+  ✅ 無資金丟失: 確認
+```
+
+## 🔧 API參考
+
+### 智能合約接口
+
+#### AssetContract
+```solidity
+// 發起交易
+function inceptTrade(uint id, uint256 amount, address payable seller, 
+                    string memory keyEncryptedSeller, uint256 duration) public
+
+// 確認交易  
+function confirmTrade(uint id, uint256 amount, address payable buyer, 
+                     string memory keyEncryptedBuyer) public payable
+
+// 使用密鑰轉移資產
+function transferWithKey(uint id, string memory key) public
+
+// 查詢交易
+function getTrade(uint _tradeId) public view returns (...)
+```
+
+#### PaymentContract
+```solidity
+// 發起支付
+function inceptPayment(uint id, uint assetTradeId, uint256 amount, 
+                      address payable seller, string memory keyEncryptedSeller, 
+                      uint256 duration) public payable
+
+// 確認支付
+function confirmPayment(uint id, uint256 amount, address payable seller, 
+                       string memory keyEncryptedSeller) public
+
+// 查詢支付
+function getPayment(uint _paymentId) public view returns (...)
+```
+
+### Oracle服務接口
+
+Oracle服務通過WebSocket或HTTP提供以下功能：
+- 實時交易狀態查詢
+- 跨鏈同步狀態監控
+- 風險警報通知
+
+## 📚 詳細文檔
+
+- [超時測試套件文檔](backend/test/TIMEOUT_TESTS_README.md)
+- [超時修復方案](backend/test/TIMEOUT_FIXES_SUMMARY.md)
+- [系統日誌分析](backend/logs/)
+
+## ⚠️ 重要提醒
+
+1. **測試網路使用**: 目前配置為Sepolia測試網路，請勿在主網使用
+2. **私鑰安全**: 確保私鑰安全存儲，不要提交到版本控制
+3. **Gas費用**: 測試需要足夠的測試ETH支付Gas費用
+4. **時間同步**: 確保運行Oracle的服務器時間準確
+5. **網路連接**: Oracle服務需要穩定的網路連接到以太坊節點
+
+## 🤝 貢獻指南
+
+1. Fork 這個專案
+2. 創建您的功能分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交您的變更 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 開啟一個 Pull Request
+
+## 📄 授權條款
+
+本專案採用 MIT 授權條款 - 查看 [LICENSE](LICENSE) 檔案以獲得詳細資訊。
+
+## 📞 聯絡方式
+
+如有任何問題或建議，請通過以下方式聯絡：
+- 創建 Issue
+- 發送 Pull Request
+- 或其他聯絡方式
+
+---
+
+**⚡ 系統狀態**: 開發中 | **🔐 安全等級**: 測試網路 | **📈 測試覆蓋率**: 85%+
+
