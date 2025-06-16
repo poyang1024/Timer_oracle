@@ -852,15 +852,21 @@ async function testTimeoutRefund() {
 
         const sellerAddress = await assetSellerSigner.getAddress();
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', `\n測試參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  短超時時間: ${SHORT_DURATION} 秒`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
 
         // 步驟1：買方在Asset鏈上創建交易
         colorLog('yellow', '\n步驟1：買方在Asset鏈上創建短超時交易');
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, SHORT_DURATION),
             `Asset交易創建 (${SHORT_DURATION}秒超時)`
         );
         
@@ -869,7 +875,7 @@ async function testTimeoutRefund() {
         // 步驟2：買方在Payment鏈上創建支付
         colorLog('yellow', '\n步驟2：買方在Payment鏈上創建短超時支付');
         await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION, { value: AMOUNT }),
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, SHORT_DURATION, { value: AMOUNT }),
             `Payment支付創建 (${SHORT_DURATION}秒超時)`
         );
         
@@ -955,22 +961,28 @@ async function testConfirmationTimeout() {
         const sellerAddress = await assetSellerSigner.getAddress();
         const buyerAddress = await assetBuyerSigner.getAddress();
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', `\n確認階段超時測試參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  超時時間: ${SHORT_DURATION} 秒`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
         console.log(`  測試場景: 只確認Asset，Payment超時`);
 
         // 步驟1-2：創建雙方交易
         colorLog('yellow', '\n步驟1-2：創建Asset和Payment交易');
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, SHORT_DURATION),
             'Asset交易創建'
         );
         await delay(15000);
 
         await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION, { value: AMOUNT }),
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, SHORT_DURATION, { value: AMOUNT }),
             'Payment創建'
         );
         await delay(15000);
@@ -978,7 +990,7 @@ async function testConfirmationTimeout() {
         // 步驟3：只確認Asset交易，不確認Payment
         colorLog('yellow', '\n步驟3：只確認Asset交易（模擬部分確認情況）');
         await safeExecuteTransaction(
-            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, BUYER_KEY, { value: AMOUNT }),
             'Asset交易確認'
         );
         await delay(15000);
@@ -1069,35 +1081,41 @@ async function testExecutionTimeout() {
         const sellerAddress = await assetSellerSigner.getAddress();
         const buyerAddress = await assetBuyerSigner.getAddress();
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', `\n執行階段超時測試參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  超時時間: ${SHORT_DURATION} 秒`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
         console.log(`  測試場景: 雙方確認後不執行密鑰揭示`);
 
         // 步驟1-4：完成雙方確認
         colorLog('yellow', '\n步驟1-4：完成完整的確認流程');
         
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, SHORT_DURATION),
             'Asset交易創建'
         );
         await delay(15000);
 
         await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION, { value: AMOUNT }),
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, SHORT_DURATION, { value: AMOUNT }),
             'Payment創建'
         );
         await delay(15000);
 
         await safeExecuteTransaction(
-            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, BUYER_KEY, { value: AMOUNT }),
             'Asset交易確認'
         );
         await delay(15000);
 
         await safeExecuteTransaction(
-            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_BUYER),
+            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, SELLER_KEY),
             'Payment確認'
         );
         await delay(15000);
@@ -1196,17 +1214,23 @@ async function testCrossChainTimeSync() {
 
         const sellerAddress = await assetSellerSigner.getAddress();
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', `\n跨鏈時間同步測試參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  持續時間: ${DURATION} 秒`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
         console.log(`  測試場景: 故意引入跨鏈時間差`);
 
         // 步驟1：在Asset鏈創建交易
         colorLog('yellow', '\n步驟1：在Asset鏈創建交易');
         const assetStartTime = Math.floor(Date.now() / 1000);
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, DURATION),
             'Asset交易創建'
         );
         await delay(15000);
@@ -1217,7 +1241,7 @@ async function testCrossChainTimeSync() {
         
         const paymentStartTime = Math.floor(Date.now() / 1000);
         await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION, { value: AMOUNT }),
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, DURATION, { value: AMOUNT }),
             'Payment創建（延遲30秒）'
         );
         await delay(15000);
@@ -1303,17 +1327,23 @@ async function testDoubleSpendPrevention() {
 
         const sellerAddress = await assetSellerSigner.getAddress();
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', '\n攻擊模擬參數:');
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  Asset持續時間: ${ASSET_DURATION} 秒 (較短)`);
         console.log(`  Payment持續時間: ${PAYMENT_DURATION} 秒 (較長)`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
         colorLog('red', '  ⚠️  這是一個潛在的雙重支付攻擊情境');
 
         // 步驟1：買方在Asset鏈上創建交易 (短超時)
         colorLog('yellow', '\n步驟1：買方在Asset鏈上創建交易（較短超時）');
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, ASSET_DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, ASSET_DURATION),
             `Asset交易創建 (${ASSET_DURATION}秒超時)`
         );
         
@@ -1334,7 +1364,7 @@ async function testDoubleSpendPrevention() {
         
         try {
             await safeExecuteTransaction(
-                () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, PAYMENT_DURATION, { value: AMOUNT }),
+                () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, PAYMENT_DURATION, { value: AMOUNT }),
                 `Payment支付創建 (${PAYMENT_DURATION}秒超時)`
             );
             
@@ -1415,10 +1445,16 @@ async function testInvalidKeyHandling() {
         const buyerAddress = await assetBuyerSigner.getAddress();
         const INVALID_KEY = "InvalidKeyForTesting123456789";
 
+        // 生成雙密鑰
+        const SELLER_KEY = `seller_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+        const BUYER_KEY = `buyer_key_${TRADE_ID}_${Math.random().toString(36).substring(7)}`;
+
         colorLog('cyan', `\n測試參數:`);
         console.log(`  交易ID: ${TRADE_ID}`);
         console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
         console.log(`  有效期限: ${DURATION} 秒`);
+        console.log(`  賣方密鑰: ${SELLER_KEY}`);
+        console.log(`  買方密鑰: ${BUYER_KEY}`);
         console.log(`  無效密鑰: ${INVALID_KEY}`);
 
         // 創建完整的交易流程直到確認階段
@@ -1426,28 +1462,28 @@ async function testInvalidKeyHandling() {
         
         // Asset交易創建
         await safeExecuteTransaction(
-            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION),
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, SELLER_KEY, DURATION),
             'Asset交易創建'
         );
         await delay(15000);
 
         // Payment創建
         await safeExecuteTransaction(
-            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION, { value: AMOUNT }),
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, BUYER_KEY, DURATION, { value: AMOUNT }),
             'Payment創建'
         );
         await delay(15000);
 
         // Asset確認
         await safeExecuteTransaction(
-            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, BUYER_KEY, { value: AMOUNT }),
             'Asset交易確認'
         );
         await delay(15000);
 
         // Payment確認
         await safeExecuteTransaction(
-            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_BUYER),
+            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, SELLER_KEY),
             'Payment確認'
         );
         await delay(15000);
@@ -1484,12 +1520,12 @@ async function testInvalidKeyHandling() {
         // 步驟7：使用正確密鑰完成交易
         colorLog('yellow', '\n步驟7：使用正確密鑰完成交易');
         await safeExecuteTransaction(
-            () => assetContractBuyer.transferWithKey(TRADE_ID, ENCRYPTED_KEY_SELLER),
+            () => assetContractBuyer.transferWithKey(TRADE_ID, SELLER_KEY),
             'Asset轉移 (正確密鑰)'
         );
 
         await safeExecuteTransaction(
-            () => paymentContractBuyer.transferWithKey(PAYMENT_ID, ENCRYPTED_KEY_SELLER),
+            () => paymentContractBuyer.transferWithKey(PAYMENT_ID, SELLER_KEY),
             'Payment釋放 (正確密鑰)'
         );
 
