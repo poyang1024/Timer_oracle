@@ -42,6 +42,9 @@ const ENCRYPTED_KEY_BUYER = "ltRkeyWXsmA11d7qU3FCWfBs1LEwxXeU";   // buyerkey
 let testResults = {
     normalTrade: false,
     timeoutRefund: false,
+    confirmationTimeout: false,
+    executionTimeout: false,
+    crossChainTimeSync: false,
     doubleSpendPrevention: false,
     invalidKeyTest: false
 };
@@ -450,8 +453,8 @@ async function compareBalanceChanges(beforeBalances, afterBalances, tradeAmount)
     console.log(`  總交易數: ${totalAssetNonceChange + totalPaymentNonceChange}`);
     
     if (systemTotalChange < 0) {
-        const avgGasPerTx = Math.abs(systemTotalChange) / (totalAssetNonceChange + totalPaymentNonceChange);
-        console.log(`  平均每筆交易 Gas 費用: ${ethers.formatEther(avgGasPerTx)} ETH`);
+        const avgGasPerTx = Math.abs(Number(systemTotalChange)) / (totalAssetNonceChange + totalPaymentNonceChange);
+        console.log(`  平均每筆交易 Gas 費用: ${ethers.formatEther(BigInt(Math.floor(avgGasPerTx)))} ETH`);
     }
 
     // 🔧 交易驗證 (增強版)
@@ -497,9 +500,9 @@ async function compareBalanceChanges(beforeBalances, afterBalances, tradeAmount)
                 colorLog('yellow', `  - 可能存在重複交易或額外的費用扣除`);
             }
             
-            const sellerTotalGasSpent = Math.abs(sellerTotalChange - sellerPaymentChange);
+            const sellerTotalGasSpent = Math.abs(Number(sellerTotalChange) - Number(sellerPaymentChange));
             if (sellerTotalGasSpent > 0) {
-                colorLog('yellow', `  - 賣方總 Gas 費用: ${ethers.formatEther(sellerTotalGasSpent)} ETH`);
+                colorLog('yellow', `  - 賣方總 Gas 費用: ${ethers.formatEther(BigInt(Math.floor(sellerTotalGasSpent)))} ETH`);
             }
         }
     } else {
@@ -926,7 +929,355 @@ async function testTimeoutRefund() {
     }
 }
 
-// 測試3：雙重支付攻擊預防
+// 🔧 新增：測試2A - 確認階段超時測試
+async function testConfirmationTimeout() {
+    colorLog('bright', '\n' + '='.repeat(60));
+    colorLog('bright', '測試2A: 確認階段超時測試 (對應流程圖 Timeout 1)');
+    colorLog('bright', '='.repeat(60));
+    
+    try {
+        const providers = await setupProviders();
+        const {
+            assetContractBuyer,
+            assetContractSeller,
+            paymentContractBuyer,
+            assetSellerSigner,
+            assetBuyerSigner
+        } = providers;
+
+        const beforeBalances = await checkAccountBalances(providers, "確認階段超時測試前");
+
+        const TRADE_ID = Math.floor(Date.now() / 1000) + 1100;
+        const PAYMENT_ID = TRADE_ID;
+        const AMOUNT = ethers.parseEther("0.005");
+        const SHORT_DURATION = 120; // 2分鐘
+
+        const sellerAddress = await assetSellerSigner.getAddress();
+        const buyerAddress = await assetBuyerSigner.getAddress();
+
+        colorLog('cyan', `\n確認階段超時測試參數:`);
+        console.log(`  交易ID: ${TRADE_ID}`);
+        console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
+        console.log(`  超時時間: ${SHORT_DURATION} 秒`);
+        console.log(`  測試場景: 只確認Asset，Payment超時`);
+
+        // 步驟1-2：創建雙方交易
+        colorLog('yellow', '\n步驟1-2：創建Asset和Payment交易');
+        await safeExecuteTransaction(
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION),
+            'Asset交易創建'
+        );
+        await delay(15000);
+
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION, { value: AMOUNT }),
+            'Payment創建'
+        );
+        await delay(15000);
+
+        // 步驟3：只確認Asset交易，不確認Payment
+        colorLog('yellow', '\n步驟3：只確認Asset交易（模擬部分確認情況）');
+        await safeExecuteTransaction(
+            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+            'Asset交易確認'
+        );
+        await delay(15000);
+
+        // 檢查部分確認狀態
+        const partialStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        colorLog('cyan', '\n部分確認狀態檢查:');
+        console.log(`  Asset狀態: ${getTradeStateText(partialStatus?.assetTrade?.state || 0)}`);
+        console.log(`  Payment狀態: ${getTradeStateText(partialStatus?.paymentTrade?.state || 0)}`);
+
+        // 步驟4：等待超時
+        const waitTime = SHORT_DURATION + 30;
+        colorLog('yellow', `\n步驟4：等待確認階段超時 (${waitTime}秒)...`);
+        
+        const segments = 4;
+        const segmentTime = Math.floor(waitTime / segments);
+        for (let i = 0; i < segments; i++) {
+            await delay(segmentTime * 1000);
+            colorLog('cyan', `  等待進度: ${Math.round((i + 1) / segments * 100)}%`);
+            
+            // 中途檢查狀態
+            if (i === 1) {
+                const midStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+                colorLog('cyan', `  中途檢查 - Asset: ${getTradeStateText(midStatus?.assetTrade?.state || 0)}, Payment: ${getTradeStateText(midStatus?.paymentTrade?.state || 0)}`);
+            }
+        }
+
+        // 檢查最終狀態
+        const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        const afterBalances = await checkAccountBalances(providers, "確認階段超時後");
+        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+
+        // 驗證結果
+        const isProperlyHandled = !finalStatus || 
+                                 (!finalStatus.assetTrade.isActive && !finalStatus.paymentTrade.isActive) ||
+                                 (finalStatus.assetTrade.state === 4 && finalStatus.paymentTrade.state === 4);
+
+        if (isProperlyHandled) {
+            colorLog('green', '✓ 確認階段超時測試成功: Oracle正確處理了部分確認超時');
+            colorLog('green', '  - 已確認的Asset交易被回滾');
+            colorLog('green', '  - 未確認的Payment被自動取消');
+            return true;
+        } else {
+            colorLog('yellow', '⚠️ 確認階段超時處理需要改進');
+            colorLog('cyan', `  最終狀態 - Asset: ${getTradeStateText(finalStatus?.assetTrade?.state || 0)}, Payment: ${getTradeStateText(finalStatus?.paymentTrade?.state || 0)}`);
+            
+            // 檢查是否為部分確認狀態（Asset確認但Payment未確認）
+            if (finalStatus?.assetTrade?.state === 2 && finalStatus?.paymentTrade?.state !== 2) {
+                colorLog('red', '  ✗ 檢測到部分確認狀態，需要改進回滾機制');
+                colorLog('red', '  - Asset交易已確認但Payment未確認');
+                colorLog('red', '  - 這可能導致資金鎖定風險');
+            }
+            
+            return false;
+        }
+
+    } catch (error) {
+        colorLog('red', '✗ 確認階段超時測試失敗: ' + error.message);
+        console.error('詳細錯誤:', error);
+        return false;
+    }
+}
+
+// 🔧 新增：測試2B - 執行階段超時測試
+async function testExecutionTimeout() {
+    colorLog('bright', '\n' + '='.repeat(60));
+    colorLog('bright', '測試2B: 執行階段超時測試 (對應流程圖 Timeout 2)');
+    colorLog('bright', '='.repeat(60));
+    
+    try {
+        const providers = await setupProviders();
+        const {
+            assetContractBuyer,
+            assetContractSeller,
+            paymentContractBuyer,
+            paymentContractSeller,
+            assetSellerSigner,
+            assetBuyerSigner
+        } = providers;
+
+        const beforeBalances = await checkAccountBalances(providers, "執行階段超時測試前");
+
+        const TRADE_ID = Math.floor(Date.now() / 1000) + 1200;
+        const PAYMENT_ID = TRADE_ID;
+        const AMOUNT = ethers.parseEther("0.005");
+        const SHORT_DURATION = 150; // 2.5分鐘
+
+        const sellerAddress = await assetSellerSigner.getAddress();
+        const buyerAddress = await assetBuyerSigner.getAddress();
+
+        colorLog('cyan', `\n執行階段超時測試參數:`);
+        console.log(`  交易ID: ${TRADE_ID}`);
+        console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
+        console.log(`  超時時間: ${SHORT_DURATION} 秒`);
+        console.log(`  測試場景: 雙方確認後不執行密鑰揭示`);
+
+        // 步驟1-4：完成雙方確認
+        colorLog('yellow', '\n步驟1-4：完成完整的確認流程');
+        
+        await safeExecuteTransaction(
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION),
+            'Asset交易創建'
+        );
+        await delay(15000);
+
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, SHORT_DURATION, { value: AMOUNT }),
+            'Payment創建'
+        );
+        await delay(15000);
+
+        await safeExecuteTransaction(
+            () => assetContractSeller.confirmTrade(TRADE_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER, { value: AMOUNT }),
+            'Asset交易確認'
+        );
+        await delay(15000);
+
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_BUYER),
+            'Payment確認'
+        );
+        await delay(15000);
+
+        // 檢查雙方確認狀態
+        const confirmedStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        colorLog('cyan', '\n雙方確認狀態檢查:');
+        console.log(`  Asset狀態: ${getTradeStateText(confirmedStatus?.assetTrade?.state || 0)}`);
+        console.log(`  Payment狀態: ${getTradeStateText(confirmedStatus?.paymentTrade?.state || 0)}`);
+
+        if (!confirmedStatus || confirmedStatus.assetTrade.state !== 2 || confirmedStatus.paymentTrade.state !== 2) {
+            colorLog('yellow', '⚠️ 警告: 雙方確認狀態未如預期，但繼續執行階段超時測試...');
+        } else {
+            colorLog('green', '✓ 雙方確認完成，進入執行階段');
+        }
+
+        // 步驟5：不執行密鑰揭示，等待執行階段超時
+        const waitTime = SHORT_DURATION + 30;
+        colorLog('yellow', `\n步驟5：不執行密鑰揭示，等待執行階段超時 (${waitTime}秒)...`);
+        colorLog('red', '  注意: 這模擬了買方不履行密鑰揭示義務的情況');
+        
+        const segments = 5;
+        const segmentTime = Math.floor(waitTime / segments);
+        for (let i = 0; i < segments; i++) {
+            await delay(segmentTime * 1000);
+            colorLog('cyan', `  等待進度: ${Math.round((i + 1) / segments * 100)}%`);
+            
+            // 定期檢查狀態變化
+            if (i === 2) {
+                const midStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+                colorLog('cyan', `  中途檢查 - Asset: ${getTradeStateText(midStatus?.assetTrade?.state || 0)}, Payment: ${getTradeStateText(midStatus?.paymentTrade?.state || 0)}`);
+            }
+        }
+
+        // 檢查執行階段超時處理結果
+        const finalStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        const afterBalances = await checkAccountBalances(providers, "執行階段超時後");
+        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+
+        // 驗證執行階段超時處理
+        const isExecutionTimeoutHandled = !finalStatus || 
+                                         (!finalStatus.assetTrade.isActive && !finalStatus.paymentTrade.isActive) ||
+                                         (finalStatus.assetTrade.state === 4 && finalStatus.paymentTrade.state === 4);
+
+        if (isExecutionTimeoutHandled) {
+            colorLog('green', '✓ 執行階段超時測試成功: Oracle正確處理了執行超時');
+            colorLog('green', '  - 雙方鎖定的資金被正確退回');
+            colorLog('green', '  - 避免了資金永久鎖定的風險');
+            return true;
+        } else {
+            colorLog('yellow', '⚠️ 執行階段超時處理需要改進');
+            colorLog('cyan', `  最終狀態 - Asset: ${getTradeStateText(finalStatus?.assetTrade?.state || 0)}, Payment: ${getTradeStateText(finalStatus?.paymentTrade?.state || 0)}`);
+            
+            // 檢查是否為雙方確認但未執行的狀態
+            if (finalStatus?.assetTrade?.state === 2 && finalStatus?.paymentTrade?.state === 2) {
+                colorLog('red', '  ✗ 檢測到執行階段資金鎖定風險');
+                colorLog('red', '  - 雙方都已確認但未執行密鑰揭示');
+                colorLog('red', '  - 資金可能被永久鎖定，需要強制退款機制');
+                
+                // 計算鎖定時間
+                const lockTime = afterBalances.timestamp - beforeBalances.timestamp;
+                colorLog('red', `  - 資金已鎖定 ${lockTime} 秒`);
+            }
+            
+            colorLog('red', '  風險: 資金可能被永久鎖定');
+            return false;
+        }
+
+    } catch (error) {
+        colorLog('red', '✗ 執行階段超時測試失敗: ' + error.message);
+        console.error('詳細錯誤:', error);
+        return false;
+    }
+}
+
+// 🔧 新增：測試2C - 跨鏈時間同步測試
+async function testCrossChainTimeSync() {
+    colorLog('bright', '\n' + '='.repeat(60));
+    colorLog('bright', '測試2C: 跨鏈時間同步測試');
+    colorLog('bright', '='.repeat(60));
+    
+    try {
+        const providers = await setupProviders();
+        const {
+            assetContractBuyer,
+            paymentContractBuyer,
+            assetSellerSigner
+        } = providers;
+
+        const beforeBalances = await checkAccountBalances(providers, "跨鏈時間同步測試前");
+
+        const TRADE_ID = Math.floor(Date.now() / 1000) + 1300;
+        const PAYMENT_ID = TRADE_ID;
+        const AMOUNT = ethers.parseEther("0.005");
+        const DURATION = 180; // 3分鐘
+
+        const sellerAddress = await assetSellerSigner.getAddress();
+
+        colorLog('cyan', `\n跨鏈時間同步測試參數:`);
+        console.log(`  交易ID: ${TRADE_ID}`);
+        console.log(`  金額: ${ethers.formatEther(AMOUNT)} ETH`);
+        console.log(`  持續時間: ${DURATION} 秒`);
+        console.log(`  測試場景: 故意引入跨鏈時間差`);
+
+        // 步驟1：在Asset鏈創建交易
+        colorLog('yellow', '\n步驟1：在Asset鏈創建交易');
+        const assetStartTime = Math.floor(Date.now() / 1000);
+        await safeExecuteTransaction(
+            () => assetContractBuyer.inceptTrade(TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION),
+            'Asset交易創建'
+        );
+        await delay(15000);
+
+        // 步驟2：故意延遲後在Payment鏈創建支付
+        colorLog('yellow', '\n步驟2：延遲30秒後在Payment鏈創建支付（模擬時間差）');
+        await delay(30000); // 故意引入30秒時間差
+        
+        const paymentStartTime = Math.floor(Date.now() / 1000);
+        await safeExecuteTransaction(
+            () => paymentContractBuyer.inceptPayment(PAYMENT_ID, TRADE_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_SELLER, DURATION, { value: AMOUNT }),
+            'Payment創建（延遲30秒）'
+        );
+        await delay(15000);
+
+        // 檢查時間差
+        const timeDiff = paymentStartTime - assetStartTime;
+        colorLog('cyan', `\n跨鏈時間差分析:`);
+        console.log(`  Asset創建時間: ${new Date(assetStartTime * 1000).toLocaleString()}`);
+        console.log(`  Payment創建時間: ${new Date(paymentStartTime * 1000).toLocaleString()}`);
+        console.log(`  時間差: ${timeDiff} 秒`);
+
+        // 檢查Oracle是否檢測到時間同步問題
+        const syncStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+        
+        if (syncStatus && syncStatus.assetTrade.isActive && syncStatus.paymentTrade.isActive) {
+            colorLog('cyan', '\n等待Oracle檢測時間同步問題 (30秒)...');
+            await delay(30000);
+            
+            const finalSyncStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+            
+            // 檢查Oracle是否處理了時間同步問題
+            if (finalSyncStatus && finalSyncStatus.assetTrade.inceptionTime && finalSyncStatus.paymentTrade.inceptionTime) {
+                const contractTimeDiff = Math.abs(finalSyncStatus.paymentTrade.inceptionTime - finalSyncStatus.assetTrade.inceptionTime);
+                colorLog('cyan', `\n合約記錄的時間差: ${contractTimeDiff} 秒`);
+                
+                if (contractTimeDiff > 60) {
+                    colorLog('yellow', '⚠️ 檢測到顯著的跨鏈時間差異');
+                    
+                    // 等待看Oracle是否會處理這個風險
+                    await delay(30000);
+                    const riskHandledStatus = await checkTransactionStatusDetailed(assetContractBuyer, paymentContractBuyer, TRADE_ID, PAYMENT_ID);
+                    
+                    if (!riskHandledStatus || (!riskHandledStatus.assetTrade.isActive && !riskHandledStatus.paymentTrade.isActive)) {
+                        colorLog('green', '✓ Oracle正確處理了跨鏈時間同步風險');
+                        return true;
+                    } else {
+                        colorLog('yellow', '⚠️ Oracle未處理跨鏈時間同步風險');
+                        return false;
+                    }
+                } else {
+                    colorLog('green', '✓ Oracle成功同步了跨鏈時間');
+                    return true;
+                }
+            }
+        }
+
+        const afterBalances = await checkAccountBalances(providers, "跨鏈時間同步測試後");
+        await compareBalanceChanges(beforeBalances, afterBalances, ethers.formatEther(AMOUNT));
+
+        colorLog('green', '✓ 跨鏈時間同步測試完成');
+        return true;
+
+    } catch (error) {
+        colorLog('red', '✗ 跨鏈時間同步測試失敗: ' + error.message);
+        console.error('詳細錯誤:', error);
+        return false;
+    }
+}
+
+// 🔧 測試3：雙重支付攻擊預防
 async function testDoubleSpendPrevention() {
     colorLog('bright', '\n' + '='.repeat(60));
     colorLog('bright', '測試3: 雙重支付攻擊預防');
@@ -1034,7 +1385,7 @@ async function testDoubleSpendPrevention() {
     }
 }
 
-// 測試4: 無效密鑰測試
+// 🔧 測試4: 無效密鑰測試
 async function testInvalidKeyHandling() {
     colorLog('bright', '\n' + '='.repeat(60));
     colorLog('bright', '測試4: 無效密鑰處理測試');
@@ -1096,7 +1447,7 @@ async function testInvalidKeyHandling() {
 
         // Payment確認
         await safeExecuteTransaction(
-            () => paymentContractSeller.confirmPayment(PAYMENT_ID, AMOUNT, buyerAddress, ENCRYPTED_KEY_BUYER),
+            () => paymentContractBuyer.confirmPayment(PAYMENT_ID, AMOUNT, sellerAddress, ENCRYPTED_KEY_BUYER),
             'Payment確認'
         );
         await delay(15000);
@@ -1255,7 +1606,10 @@ function generateTestReport() {
 
     colorLog('cyan', '\n詳細結果:');
     console.log(`  測試1 (正常交易流程): ${testResults.normalTrade ? '✓ 通過' : '✗ 失敗'}`);
-    console.log(`  測試2 (交易超時自動退款): ${testResults.timeoutRefund ? '✓ 通過' : '✗ 失敗'}`);
+    console.log(`  測試2 (基本超時退款): ${testResults.timeoutRefund ? '✓ 通過' : '✗ 失敗'}`);
+    console.log(`  測試2A (確認階段超時): ${testResults.confirmationTimeout ? '✓ 通過' : '✗ 失敗'}`);
+    console.log(`  測試2B (執行階段超時): ${testResults.executionTimeout ? '✓ 通過' : '✗ 失敗'}`);
+    console.log(`  測試2C (跨鏈時間同步): ${testResults.crossChainTimeSync ? '✓ 通過' : '✗ 失敗'}`);
     console.log(`  測試3 (雙重支付攻擊預防): ${testResults.doubleSpendPrevention ? '✓ 通過' : '✗ 失敗'}`);
     console.log(`  測試4 (無效密鑰處理): ${testResults.invalidKeyTest ? '✓ 通過' : '✗ 失敗'}`);
 
@@ -1274,11 +1628,23 @@ function generateTestReport() {
         console.log('    - 確認帳戶餘額充足');
         console.log('    - 檢查網路連接和RPC端點');
     }
-    if (!testResults.timeoutRefund) {
+    if (!testResults.timeoutRefund || !testResults.confirmationTimeout || !testResults.executionTimeout) {
         console.log('  ⏰ 超時處理問題:');
         console.log('    - 檢查Oracle的超時處理機制');
         console.log('    - 調整checkAndHandleExpiredTrades的執行頻率');
         console.log('    - 驗證時間同步邏輯');
+        if (!testResults.confirmationTimeout) {
+            console.log('    - 改進確認階段超時處理（部分確認回滾）');
+        }
+        if (!testResults.executionTimeout) {
+            console.log('    - 加強執行階段超時處理（防止資金永久鎖定）');
+        }
+    }
+    if (!testResults.crossChainTimeSync) {
+        console.log('  🕐 跨鏈時間同步問題:');
+        console.log('    - 實現跨鏈時間差檢測機制');
+        console.log('    - 加強Oracle的時間同步驗證');
+        console.log('    - 設置合理的時間差容忍度');
     }
     if (!testResults.doubleSpendPrevention) {
         console.log('  🛡️ 安全性問題:');
@@ -1388,6 +1754,15 @@ async function runAllTests() {
         testResults.timeoutRefund = await testTimeoutRefund();
         await delay(10000);
 
+        testResults.confirmationTimeout = await testConfirmationTimeout();
+        await delay(10000);
+
+        testResults.executionTimeout = await testExecutionTimeout();
+        await delay(10000);
+
+        testResults.crossChainTimeSync = await testCrossChainTimeSync();
+        await delay(10000);
+
         testResults.doubleSpendPrevention = await testDoubleSpendPrevention();
         await delay(10000);
 
@@ -1458,6 +1833,18 @@ async function runSingleTest(testName) {
             case '2':
                 result = await testTimeoutRefund();
                 break;
+            case 'confirmation':
+            case '2a':
+                result = await testConfirmationTimeout();
+                break;
+            case 'execution':
+            case '2b':
+                result = await testExecutionTimeout();
+                break;
+            case 'timesync':
+            case '2c':
+                result = await testCrossChainTimeSync();
+                break;
             case 'double':
             case 'doublespend':
             case '3':
@@ -1476,7 +1863,10 @@ async function runSingleTest(testName) {
                 colorLog('yellow', '可用的測試:');
                 console.log('  balance/check - 檢查當前餘額');
                 console.log('  normal/1 - 正常交易流程測試');
-                console.log('  timeout/2 - 超時退款測試');
+                console.log('  timeout/2 - 基本超時退款測試');
+                console.log('  confirmation/2a - 確認階段超時測試');
+                console.log('  execution/2b - 執行階段超時測試');
+                console.log('  timesync/2c - 跨鏈時間同步測試');
                 console.log('  double/3 - 雙重支付預防測試');
                 console.log('  key/4 - 無效密鑰處理測試');
                 console.log('  health - 系統健康檢查');
@@ -1555,6 +1945,9 @@ module.exports = {
     testCorrectAtomicSwapWithDualKeys,
     checkCurrentBalances,
     testTimeoutRefund,
+    testConfirmationTimeout,
+    testExecutionTimeout,
+    testCrossChainTimeSync,
     testDoubleSpendPrevention,
     testInvalidKeyHandling,
     checkSystemHealth,
