@@ -279,43 +279,47 @@ async function fulfillAssetTime(requestId, timestamp) {
 
 async function handleAssetFailedConfirmation(tradeId) {
     try {
-        // 🔑 在調用合約函數前先檢查交易狀態
-        const trade = await assetContract.getTrade(tradeId);
-        
-        // 如果交易已被刪除或已完成，直接清理內存狀態
-        if (trade[0] == 0 || trade[4] == 3 || trade[4] == 4) { // trade[0] 是 id, trade[4] 是 state
-            logger('info', `Asset交易已完成或不存在，清理內存狀態`, { 
-                tradeId,
-                exists: trade[0] != 0,
-                state: trade[4]
-            });
-            assetTrades.delete(tradeId);
-            processingAssetTrades.delete(tradeId);
-            return;
-        }
-
         const tx = await assetContract.handleFailedConfirmation(tradeId, {
             nonce: assetCurrentNonce++,
             gasLimit: 200000
         });
         await tx.wait();
+        
         logger('info', `Asset失敗確認已處理`, {
             tradeId,
             txHash: tx.hash
         });
         
-        // 🔑 成功處理後清理內存狀態
-        assetTrades.delete(tradeId);
-        
-        // Check if this trade has a corresponding payment trade
-        if (crossChainTrades.has(`asset_${tradeId}`)) {
-            const paymentId = crossChainTrades.get(`asset_${tradeId}`);
+        // 🔧 處理對應的Payment失敗
+        const paymentId = crossChainTrades.get(`asset_${tradeId}`);
+        if (paymentId) {
             logger('info', `處理對應的Payment失敗`, {
                 assetTradeId: tradeId,
                 paymentId
             });
-            await handlePaymentFailedConfirmation(paymentId);
+            
+            // 清理跨鏈映射
+            crossChainTrades.delete(`asset_${tradeId}`);
+            crossChainTrades.delete(`payment_${paymentId}`);
+            
+            // 如果Payment還存在，也處理失敗
+            if (paymentTrades.has(paymentId) && !processingPaymentTrades.has(paymentId)) {
+                processingPaymentTrades.add(paymentId);
+                try {
+                    await handlePaymentFailedConfirmation(paymentId);
+                } catch (error) {
+                    logger('error', `處理對應Payment失敗時出錯`, {
+                        paymentId,
+                        error: error.message
+                    });
+                } finally {
+                    processingPaymentTrades.delete(paymentId);
+                }
+            }
         }
+        
+        assetTrades.delete(tradeId);
+        
     } catch (error) {
         if (error.message.includes('nonce too low')) {
             assetCurrentNonce = await assetProvider.getTransactionCount(assetSigner.address);
@@ -327,6 +331,68 @@ async function handleAssetFailedConfirmation(tradeId) {
         
         // 🔑 任何錯誤都清理內存狀態，避免重複嘗試
         logger('error', `處理Asset失敗確認時發生錯誤`, {
+            tradeId,
+            error: error.message
+        });
+        assetTrades.delete(tradeId);
+        processingAssetTrades.delete(tradeId);
+    }
+}
+
+// 新增：處理Asset執行階段超時
+async function handleAssetExecutionTimeout(tradeId) {
+    try {
+        const tx = await assetContract.handleExecutionTimeout(tradeId, {
+            nonce: assetCurrentNonce++,
+            gasLimit: 200000
+        });
+        await tx.wait();
+        
+        logger('info', `Asset執行階段超時已處理`, {
+            tradeId,
+            txHash: tx.hash
+        });
+        
+        // 🔧 處理對應的Payment執行超時
+        const paymentId = crossChainTrades.get(`asset_${tradeId}`);
+        if (paymentId) {
+            logger('info', `處理對應的Payment執行超時`, {
+                assetTradeId: tradeId,
+                paymentId
+            });
+            
+            // 清理跨鏈映射
+            crossChainTrades.delete(`asset_${tradeId}`);
+            crossChainTrades.delete(`payment_${paymentId}`);
+            
+            // 如果Payment還存在，也處理執行超時
+            if (paymentTrades.has(paymentId) && !processingPaymentTrades.has(paymentId)) {
+                processingPaymentTrades.add(paymentId);
+                try {
+                    await handlePaymentExecutionTimeout(paymentId);
+                } catch (error) {
+                    logger('error', `處理對應Payment執行超時時出錯`, {
+                        paymentId,
+                        error: error.message
+                    });
+                } finally {
+                    processingPaymentTrades.delete(paymentId);
+                }
+            }
+        }
+        
+        assetTrades.delete(tradeId);
+        
+    } catch (error) {
+        if (error.message.includes('nonce too low')) {
+            assetCurrentNonce = await assetProvider.getTransactionCount(assetSigner.address);
+            logger('warn', `Asset nonce重置`, {
+                newNonce: assetCurrentNonce
+            });
+            return handleAssetExecutionTimeout(tradeId);
+        }
+        
+        logger('error', `處理Asset執行階段超時時發生錯誤`, {
             tradeId,
             error: error.message
         });
@@ -579,43 +645,47 @@ async function fulfillPaymentTime(requestId, timestamp, retryCount = 0) {
 
 async function handlePaymentFailedConfirmation(paymentId) {
     try {
-        // 🔑 在調用合約函數前先檢查支付狀態
-        const payment = await paymentContract.getPayment(paymentId);
-        
-        // 如果支付已被刪除或已完成，直接清理內存狀態
-        if (payment[0] == 0 || payment[4] == 3 || payment[4] == 4) { // payment[0] 是 id, payment[4] 是 state
-            logger('info', `Payment交易已完成或不存在，清理內存狀態`, { 
-                paymentId,
-                exists: payment[0] != 0,
-                state: payment[4]
-            });
-            paymentTrades.delete(paymentId);
-            processingPaymentTrades.delete(paymentId);
-            return;
-        }
-
         const tx = await paymentContract.handleFailedConfirmation(paymentId, {
             nonce: paymentCurrentNonce++,
             gasLimit: 200000
         });
         await tx.wait();
+        
         logger('info', `Payment失敗確認已處理`, {
             paymentId,
             txHash: tx.hash
         });
         
-        // 🔑 成功處理後清理內存狀態
-        paymentTrades.delete(paymentId);
-        
-        // Check if this payment has a corresponding asset trade
-        if (crossChainTrades.has(`payment_${paymentId}`)) {
-            const assetTradeId = crossChainTrades.get(`payment_${paymentId}`);
+        // 🔧 處理對應的Asset失敗
+        const assetTradeId = crossChainTrades.get(`payment_${paymentId}`);
+        if (assetTradeId) {
             logger('info', `處理對應的Asset失敗`, {
                 paymentId,
                 assetTradeId
             });
-            await handleAssetFailedConfirmation(assetTradeId);
+            
+            // 清理跨鏈映射
+            crossChainTrades.delete(`payment_${paymentId}`);
+            crossChainTrades.delete(`asset_${assetTradeId}`);
+            
+            // 如果Asset還存在，也處理失敗
+            if (assetTrades.has(assetTradeId) && !processingAssetTrades.has(assetTradeId)) {
+                processingAssetTrades.add(assetTradeId);
+                try {
+                    await handleAssetFailedConfirmation(assetTradeId);
+                } catch (error) {
+                    logger('error', `處理對應Asset失敗時出錯`, {
+                        assetTradeId,
+                        error: error.message
+                    });
+                } finally {
+                    processingAssetTrades.delete(assetTradeId);
+                }
+            }
         }
+        
+        paymentTrades.delete(paymentId);
+        
     } catch (error) {
         if (error.message.includes('nonce too low')) {
             paymentCurrentNonce = await paymentProvider.getTransactionCount(paymentSigner.address);
@@ -627,6 +697,68 @@ async function handlePaymentFailedConfirmation(paymentId) {
         
         // 🔑 任何錯誤都清理內存狀態，避免重複嘗試
         logger('error', `處理Payment失敗確認時發生錯誤`, {
+            paymentId,
+            error: error.message
+        });
+        paymentTrades.delete(paymentId);
+        processingPaymentTrades.delete(paymentId);
+    }
+}
+
+// 新增：處理Payment執行階段超時
+async function handlePaymentExecutionTimeout(paymentId) {
+    try {
+        const tx = await paymentContract.handleExecutionTimeout(paymentId, {
+            nonce: paymentCurrentNonce++,
+            gasLimit: 200000
+        });
+        await tx.wait();
+        
+        logger('info', `Payment執行階段超時已處理`, {
+            paymentId,
+            txHash: tx.hash
+        });
+        
+        // 🔧 處理對應的Asset執行超時
+        const assetTradeId = crossChainTrades.get(`payment_${paymentId}`);
+        if (assetTradeId) {
+            logger('info', `處理對應的Asset執行超時`, {
+                paymentId,
+                assetTradeId
+            });
+            
+            // 清理跨鏈映射
+            crossChainTrades.delete(`payment_${paymentId}`);
+            crossChainTrades.delete(`asset_${assetTradeId}`);
+            
+            // 如果Asset還存在，也處理執行超時
+            if (assetTrades.has(assetTradeId) && !processingAssetTrades.has(assetTradeId)) {
+                processingAssetTrades.add(assetTradeId);
+                try {
+                    await handleAssetExecutionTimeout(assetTradeId);
+                } catch (error) {
+                    logger('error', `處理對應Asset執行超時時出錯`, {
+                        assetTradeId,
+                        error: error.message
+                    });
+                } finally {
+                    processingAssetTrades.delete(assetTradeId);
+                }
+            }
+        }
+        
+        paymentTrades.delete(paymentId);
+        
+    } catch (error) {
+        if (error.message.includes('nonce too low')) {
+            paymentCurrentNonce = await paymentProvider.getTransactionCount(paymentSigner.address);
+            logger('warn', `Payment nonce重置`, {
+                newNonce: paymentCurrentNonce
+            });
+            return handlePaymentExecutionTimeout(paymentId);
+        }
+        
+        logger('error', `處理Payment執行階段超時時發生錯誤`, {
             paymentId,
             error: error.message
         });
@@ -652,9 +784,57 @@ async function checkAndHandleExpiredTrades() {
     
     // Check Asset Chain expired trades - 先收集，再處理
     const expiredAssetTrades = [];
+    const executionTimeoutAssetTrades = [];
+    
     for (const [tradeId, trade] of assetTrades.entries()) {
-        if (currentTime - trade.inceptionTime > trade.duration && !processingAssetTrades.has(tradeId)) {
+        if (processingAssetTrades.has(tradeId)) continue;
+        
+        const timeElapsed = currentTime - trade.inceptionTime;
+        
+        // 檢查執行階段超時（已確認但未執行）
+        if (trade.confirmationTime && 
+            currentTime - trade.confirmationTime > trade.duration && 
+            timeElapsed <= trade.duration * 2) { // 給執行階段額外時間
+            executionTimeoutAssetTrades.push(tradeId);
+        }
+        // 檢查總體超時
+        else if (timeElapsed > trade.duration) {
             expiredAssetTrades.push(tradeId);
+        }
+    }
+    
+    // 處理執行階段超時
+    for (const tradeId of executionTimeoutAssetTrades) {
+        if (processingAssetTrades.has(tradeId)) continue;
+        
+        processingAssetTrades.add(tradeId);
+        try {
+            const contractTrade = await assetContract.getTrade(tradeId);
+            
+            if (contractTrade[0] == 0 || contractTrade[4] == 3 || contractTrade[4] == 4) {
+                logger('info', `執行階段檢查：Asset交易已完成，清理內存狀態`, { tradeId });
+                assetTrades.delete(tradeId);
+                continue;
+            }
+            
+            // 檢查是否為已確認狀態
+            if (contractTrade[4] == 2) { // Confirmed state
+                logger('info', `檢測到Asset交易執行階段超時`, {
+                    tradeId,
+                    duration: assetTrades.get(tradeId)?.duration.toString(),
+                    executionTimeElapsed: (currentTime - assetTrades.get(tradeId)?.confirmationTime).toString()
+                });
+                
+                await handleAssetExecutionTimeout(tradeId);
+            }
+        } catch (error) {
+            logger('error', `處理執行階段超時Asset交易時發生錯誤`, {
+                tradeId,
+                error: error.message
+            });
+            assetTrades.delete(tradeId);
+        } finally {
+            processingAssetTrades.delete(tradeId);
         }
     }
     
@@ -693,9 +873,57 @@ async function checkAndHandleExpiredTrades() {
     
     // Check Payment Chain expired trades - 先收集，再處理
     const expiredPaymentTrades = [];
+    const executionTimeoutPaymentTrades = [];
+    
     for (const [paymentId, trade] of paymentTrades.entries()) {
-        if (currentTime - trade.inceptionTime > trade.duration && !processingPaymentTrades.has(paymentId)) {
+        if (processingPaymentTrades.has(paymentId)) continue;
+        
+        const timeElapsed = currentTime - trade.inceptionTime;
+        
+        // 檢查執行階段超時（已確認但未執行）
+        if (trade.confirmationTime && 
+            currentTime - trade.confirmationTime > trade.duration && 
+            timeElapsed <= trade.duration * 2) { // 給執行階段額外時間
+            executionTimeoutPaymentTrades.push(paymentId);
+        }
+        // 檢查總體超時
+        else if (timeElapsed > trade.duration) {
             expiredPaymentTrades.push(paymentId);
+        }
+    }
+    
+    // 處理執行階段超時
+    for (const paymentId of executionTimeoutPaymentTrades) {
+        if (processingPaymentTrades.has(paymentId)) continue;
+        
+        processingPaymentTrades.add(paymentId);
+        try {
+            const contractPayment = await paymentContract.getPayment(paymentId);
+            
+            if (contractPayment[0] == 0 || contractPayment[4] == 3 || contractPayment[4] == 4) {
+                logger('info', `執行階段檢查：Payment交易已完成，清理內存狀態`, { paymentId });
+                paymentTrades.delete(paymentId);
+                continue;
+            }
+            
+            // 檢查是否為已確認狀態
+            if (contractPayment[4] == 2) { // Confirmed state
+                logger('info', `檢測到Payment交易執行階段超時`, {
+                    paymentId,
+                    duration: paymentTrades.get(paymentId)?.duration.toString(),
+                    executionTimeElapsed: (currentTime - paymentTrades.get(paymentId)?.confirmationTime).toString()
+                });
+                
+                await handlePaymentExecutionTimeout(paymentId);
+            }
+        } catch (error) {
+            logger('error', `處理執行階段超時Payment交易時發生錯誤`, {
+                paymentId,
+                error: error.message
+            });
+            paymentTrades.delete(paymentId);
+        } finally {
+            processingPaymentTrades.delete(paymentId);
         }
     }
     
@@ -729,57 +957,6 @@ async function checkAndHandleExpiredTrades() {
             paymentTrades.delete(paymentId);
         } finally {
             processingPaymentTrades.delete(paymentId);
-        }
-    }
-    
-    // 檢查跨鏈交易的超時風險（保持原有邏輯作為備用機制）
-    for (const [key, value] of crossChainTrades.entries()) {
-        if (key.startsWith('asset_')) {
-            const assetTradeId = key.replace('asset_', '');
-            const paymentId = value;
-            
-            if (assetTrades.has(assetTradeId) && paymentTrades.has(paymentId)) {
-                const assetTrade = assetTrades.get(assetTradeId);
-                const paymentTrade = paymentTrades.get(paymentId);
-                
-                // 檢查是否存在雙重支付攻擊風險 (asset timeout < payment timeout)
-                if (assetTrade.duration < paymentTrade.duration) {
-                    logger('warn', `檢測到跨鏈交易的雙重支付風險`, {
-                        assetTradeId,
-                        paymentId,
-                        assetDuration: assetTrade.duration,
-                        paymentDuration: paymentTrade.duration
-                    });
-                    
-                    // 處理兩邊的交易
-                    if (!processingAssetTrades.has(assetTradeId) && !processingPaymentTrades.has(paymentId)) {
-                        try {
-                            processingAssetTrades.add(assetTradeId);
-                            processingPaymentTrades.add(paymentId);
-                            
-                            await handleAssetFailedConfirmation(assetTradeId);
-                            await handlePaymentFailedConfirmation(paymentId);
-                            
-                            logger('info', `已自動取消存在雙重支付風險的跨鏈交易`, {
-                                assetTradeId,
-                                paymentId
-                            });
-                            
-                            assetTrades.delete(assetTradeId);
-                            paymentTrades.delete(paymentId);
-                        } catch (error) {
-                            logger('error', `處理跨鏈交易雙重支付風險時出錯`, {
-                                assetTradeId,
-                                paymentId,
-                                error: error.message
-                            });
-                        } finally {
-                            processingAssetTrades.delete(assetTradeId);
-                            processingPaymentTrades.delete(paymentId);
-                        }
-                    }
-                }
-            }
         }
     }
 }
