@@ -127,13 +127,13 @@ async function executeTrade(tradeIndex, providers) {
         );
         await tx.wait();
         
-        // 4. 賣方確認Payment
+        // 4. 買方確認Payment
         await delay(5000);
-        console.log(`[交易 #${tradeIndex+1}] 步驟4: 賣方確認Payment`);
-        tx = await paymentContractSeller.confirmPayment(
+        console.log(`[交易 #${tradeIndex+1}] 步驟4: 買方確認Payment`);
+        tx = await paymentContractBuyer.confirmPayment(
             paymentId,
             amount,
-            buyerAddress,
+            sellerAddress,
             encryptedKeyForBuyer
         );
         await tx.wait();
