@@ -1,6 +1,7 @@
 const ethers = require('ethers');
 const express = require('express');
 const logger = require('./services/logger');
+const CrossChainTransactionVerifier = require('./services/crossChainTransactionVerifier');
 require('dotenv').config();
 
 const app = express();
@@ -26,6 +27,7 @@ const paymentContractABI = [
     "function fulfillTime(bytes32 _requestId, uint256 _timestamp) external",
     "function handleFailedConfirmation(uint paymentId) external",
     "event TimeRequestSent(bytes32 requestId, uint paymentId, uint256 duration)",
+    "event PaymentCompleted(uint id, address recipient, uint256 amount)",
     "function getPayment(uint _paymentId) public view returns (uint, uint256, address, address, uint8, uint256, uint256, uint256, uint)"
 ];
 
@@ -37,17 +39,24 @@ const PAYMENT_ETHEREUM_NODE_URL = process.env.PAYMENT_ETHEREUM_NODE_URL || proce
 const ASSET_PRIVATE_KEY = process.env.ASSET_PRIVATE_KEY || process.env.PRIVATE_KEY;
 const PAYMENT_PRIVATE_KEY = process.env.PAYMENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
 
+// 安全性配置 - 直接使用自定義確認數
+const DEFAULT_CONFIRMATIONS = parseInt(process.env.CUSTOM_CONFIRMATIONS);
+
 // 記錄配置信息
 logger('info', '配置信息載入', {
     assetContract: ASSET_CONTRACT_ADDRESS,
     paymentContract: PAYMENT_CONTRACT_ADDRESS,
     assetRPC: ASSET_ETHEREUM_NODE_URL?.substring(0, 50) + '...',
-    paymentRPC: PAYMENT_ETHEREUM_NODE_URL?.substring(0, 50) + '...'
+    paymentRPC: PAYMENT_ETHEREUM_NODE_URL?.substring(0, 50) + '...',
+    confirmations: DEFAULT_CONFIRMATIONS
 });
 
 // Ethereum connection variables
 let assetProvider, assetSigner, assetContract;
 let paymentProvider, paymentSigner, paymentContract;
+
+// 跨鏈交易驗證器
+let crossChainVerifier;
 
 // Tracking variables for both chains
 let assetLastProcessedBlock = 0;
@@ -65,6 +74,9 @@ const processingPaymentTrades = new Set();
 
 // Cross-chain trade mapping
 const crossChainTrades = new Map();
+
+// 跨鏈交易驗證追蹤
+const pendingCrossChainVerifications = new Map(); // paymentId -> { txHash, startTime, verified: boolean }
 
 async function initializeEthers() {
     logger('info', '開始初始化區塊鏈連接...');
@@ -97,6 +109,9 @@ async function initializeEthers() {
             signerAddress: paymentSigner.address,
             nonce: paymentCurrentNonce
         });
+        
+        // Initialize Cross-Chain Transaction Verifier
+        crossChainVerifier = new CrossChainTransactionVerifier(PAYMENT_ETHEREUM_NODE_URL);
         
         logger('info', '所有區塊鏈連接初始化完成');
         
@@ -162,6 +177,207 @@ async function performImmediateDoubleSpendCheck(assetTradeId, paymentId, assetDu
     });
     
     return { action: 'CONTINUE' };
+}
+
+// 🔧 新增：跨鏈交易驗證處理函數
+async function handlePaymentCompletedForCrossChainVerification(paymentId, txHash, blockNumber) {
+    logger('info', '📝 處理 PaymentCompleted 事件進行跨鏈交易驗證', {
+        paymentId,
+        txHash,
+        blockNumber
+    });
+    
+    try {
+        // 檢查是否有對應的 Asset 交易等待跨鏈驗證
+        const assetTradeId = crossChainTrades.get(`payment_${paymentId}`);
+        
+        if (!assetTradeId || !assetTrades.has(assetTradeId)) {
+            logger('warn', '未找到對應的 Asset 交易進行跨鏈驗證', {
+                paymentId,
+                assetTradeId
+            });
+            return;
+        }
+        
+        // 記錄待驗證的跨鏈交易
+        pendingCrossChainVerifications.set(paymentId, {
+            txHash,
+            blockNumber,
+            startTime: Date.now(),
+            verified: false,
+            assetTradeId
+        });
+        
+        logger('info', '🔐 開始跨鏈交易驗證流程', {
+            paymentId,
+            assetTradeId,
+            txHash
+        });
+        
+        // 非同步進行跨鏈交易驗證
+        performCrossChainVerification(paymentId, txHash, assetTradeId);
+        
+    } catch (error) {
+        logger('error', '處理 PaymentCompleted 事件時發生錯誤', {
+            paymentId,
+            txHash,
+            error: error.message
+        });
+    }
+}
+
+// 🔧 新增：執行跨鏈交易驗證
+async function performCrossChainVerification(paymentId, txHash, assetTradeId) {
+    logger('info', '🔍 開始執行跨鏈交易驗證', {
+        paymentId,
+        txHash,
+        assetTradeId
+    });
+    
+    try {
+        const verification = pendingCrossChainVerifications.get(paymentId);
+        if (!verification) {
+            logger('warn', '跨鏈交易驗證記錄不存在', { paymentId });
+            return;
+        }
+        
+        // 使用跨鏈交易驗證器進行驗證
+        // 使用配置的安全確認數
+        const confirmations = DEFAULT_CONFIRMATIONS;
+        const timeout = crossChainVerifier.calculateTimeout(confirmations);
+        
+        const result = await crossChainVerifier.verifyPaymentTransferTransaction(
+            txHash,
+            PAYMENT_CONTRACT_ADDRESS,
+            paymentId,
+            confirmations,  // 使用配置的確認數
+            timeout // 動態計算的超時時間
+        );
+        
+        if (result.verified && result.paymentVerified) {
+            logger('info', '✅ 跨鏈交易驗證成功！', {
+                paymentId,
+                assetTradeId,
+                txHash,
+                blockNumber: result.proof.blockNumber,
+                confirmations: result.proof.confirmations,
+                verificationTime: result.proof.verificationTime
+            });
+            
+            // 更新驗證狀態
+            verification.verified = true;
+            verification.verificationResult = result;
+            verification.completedTime = Date.now();
+            
+            // 🎯 關鍵：通知 Asset 交易可以繼續執行
+            await enableAssetTransfer(assetTradeId, paymentId, result);
+            
+        } else {
+            logger('error', '❌ 跨鏈交易驗證失敗', {
+                paymentId,
+                assetTradeId,
+                txHash,
+                error: result.error || result.paymentError,
+                timeElapsed: result.timeElapsed
+            });
+            
+            // 驗證失敗，取消 Asset 交易
+            await handleAssetTransferVerificationFailed(assetTradeId, paymentId, result);
+        }
+        
+    } catch (error) {
+        logger('error', '跨鏈交易驗證過程中發生錯誤', {
+            paymentId,
+            assetTradeId,
+            txHash,
+            error: error.message,
+            stack: error.stack
+        });
+        
+        // 驗證過程出錯，也要處理失敗情況
+        await handleAssetTransferVerificationFailed(assetTradeId, paymentId, { error: error.message });
+    }
+}
+
+// 🔧 新增：啟用 Asset 轉帳（跨鏈交易驗證成功後）
+async function enableAssetTransfer(assetTradeId, paymentId, verificationResult) {
+    logger('info', '🎯 跨鏈交易驗證成功，啟用 Asset 轉帳', {
+        assetTradeId,
+        paymentId,
+        verificationTime: verificationResult.proof.verificationTime
+    });
+    
+    try {
+        // 檢查 Asset 交易是否仍然有效且在確認狀態
+        const assetTrade = assetTrades.get(assetTradeId);
+        if (!assetTrade) {
+            logger('warn', 'Asset 交易不存在，無法啟用轉帳', { assetTradeId, paymentId });
+            return;
+        }
+        
+        // 在這裡我們不直接執行轉帳，而是在內存中標記為"已驗證"
+        // 實際的轉帳仍然由用戶觸發，但現在可以放行
+        assetTrade.crossChainVerified = true;
+        assetTrade.verificationResult = verificationResult;
+        assetTrade.verifiedAt = Date.now();
+        
+        logger('info', '✅ Asset 交易已標記為跨鏈交易驗證通過', {
+            assetTradeId,
+            paymentId,
+            txHash: verificationResult.transaction?.hash,
+            blockNumber: verificationResult.proof.blockNumber
+        });
+        
+        // 清理驗證記錄
+        pendingCrossChainVerifications.delete(paymentId);
+        
+    } catch (error) {
+        logger('error', '啟用 Asset 轉帳時發生錯誤', {
+            assetTradeId,
+            paymentId,
+            error: error.message
+        });
+    }
+}
+
+// 🔧 新增：處理 Asset 轉帳驗證失敗
+async function handleAssetTransferVerificationFailed(assetTradeId, paymentId, verificationResult) {
+    logger('error', '🚫 跨鏈交易驗證失敗，取消 Asset 交易', {
+        assetTradeId,
+        paymentId,
+        error: verificationResult.error
+    });
+    
+    try {
+        // 取消 Asset 交易
+        if (assetTrades.has(assetTradeId) && !processingAssetTrades.has(assetTradeId)) {
+            processingAssetTrades.add(assetTradeId);
+            try {
+                await handleAssetFailedConfirmation(assetTradeId);
+                logger('info', '已取消驗證失敗的 Asset 交易', { assetTradeId, paymentId });
+            } catch (error) {
+                logger('error', '取消 Asset 交易時發生錯誤', {
+                    assetTradeId,
+                    error: error.message
+                });
+            } finally {
+                processingAssetTrades.delete(assetTradeId);
+            }
+        }
+        
+        // 清理記錄
+        assetTrades.delete(assetTradeId);
+        crossChainTrades.delete(`asset_${assetTradeId}`);
+        crossChainTrades.delete(`payment_${paymentId}`);
+        pendingMerkleVerifications.delete(paymentId);
+        
+    } catch (error) {
+        logger('error', '處理 Asset 轉帳驗證失敗時發生錯誤', {
+            assetTradeId,
+            paymentId,
+            error: error.message
+        });
+    }
 }
 
 // Asset Chain handler functions
@@ -978,7 +1194,29 @@ async function pollAssetEvents() {
         const events = await assetContract.queryFilter(filter, assetLastProcessedBlock + 1, latestBlock);
 
         for (const event of events) {
+            // 安全地檢查事件參數
+            if (!event.args) {
+                logger('warn', `Asset TimeRequestSent事件缺少args`, {
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+
             const { requestId, tradeId, duration } = event.args;
+            
+            // 確保所有必要參數都存在
+            if (!requestId || !tradeId || !duration) {
+                logger('warn', `Asset TimeRequestSent事件參數不完整`, {
+                    requestId,
+                    tradeId: tradeId?.toString(),
+                    duration: duration?.toString(),
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+
             const eventTimestamp = (await event.getBlock()).timestamp;
             
             logger('info', `Asset TimeRequestSent事件接收`, {
@@ -1024,11 +1262,34 @@ async function pollPaymentEvents() {
             toBlock: latestBlock
         });
 
-        const filter = paymentContract.filters.TimeRequestSent();
-        const events = await paymentContract.queryFilter(filter, paymentLastProcessedBlock + 1, latestBlock);
+        // 🔧 監聽 TimeRequestSent 事件
+        const timeRequestFilter = paymentContract.filters.TimeRequestSent();
+        const timeRequestEvents = await paymentContract.queryFilter(timeRequestFilter, paymentLastProcessedBlock + 1, latestBlock);
 
-        for (const event of events) {
+        for (const event of timeRequestEvents) {
+            // 安全地檢查事件參數
+            if (!event.args) {
+                logger('warn', `Payment TimeRequestSent事件缺少args`, {
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+
             const { requestId, paymentId, duration } = event.args;
+            
+            // 確保所有必要參數都存在
+            if (!requestId || !paymentId || !duration) {
+                logger('warn', `Payment TimeRequestSent事件參數不完整`, {
+                    requestId,
+                    paymentId: paymentId?.toString(),
+                    duration: duration?.toString(),
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+
             const eventTimestamp = (await event.getBlock()).timestamp;
             
             logger('info', `Payment TimeRequestSent事件接收`, {
@@ -1074,6 +1335,54 @@ async function pollPaymentEvents() {
             }
         }
 
+        // 🔧 新增：監聽 PaymentCompleted 事件進行跨鏈交易驗證
+        const paymentCompletedFilter = paymentContract.filters.PaymentCompleted();
+        const paymentCompletedEvents = await paymentContract.queryFilter(paymentCompletedFilter, paymentLastProcessedBlock + 1, latestBlock);
+
+        for (const event of paymentCompletedEvents) {
+            // 安全地檢查事件參數
+            if (!event.args) {
+                logger('warn', `PaymentCompleted事件缺少args`, {
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+
+            const { id: paymentId, recipient, amount } = event.args;
+            
+            // 確保所有必要參數都存在
+            if (!paymentId || !recipient || !amount) {
+                logger('warn', `PaymentCompleted事件參數不完整`, {
+                    paymentId: paymentId?.toString(),
+                    recipient,
+                    amount: amount?.toString(),
+                    txHash: event.transactionHash,
+                    blockNumber: event.blockNumber
+                });
+                continue;
+            }
+            
+            logger('info', `Payment PaymentCompleted事件接收`, {
+                paymentId: paymentId.toString(),
+                recipient,
+                amount: amount.toString(),
+                txHash: event.transactionHash,
+                blockNumber: event.blockNumber
+            });
+            
+            // 觸發跨鏈交易驗證
+            handlePaymentCompletedForCrossChainVerification(
+                paymentId.toString(),
+                event.transactionHash,
+                event.blockNumber
+            ).catch(error => logger('error', `處理PaymentCompleted事件時發生錯誤`, {
+                error: error.message,
+                paymentId: paymentId.toString(),
+                txHash: event.transactionHash
+            }));
+        }
+
         paymentLastProcessedBlock = latestBlock;
     } catch (error) {
         logger('error', `輪詢Payment事件時發生錯誤`, {
@@ -1114,6 +1423,7 @@ app.get('/status', async (req, res) => {
                 .filter(([key]) => key.startsWith('asset_'))
                 .map(([key, value]) => [key.replace('asset_', ''), value])
             ),
+            pendingCrossChainVerifications: Object.fromEntries(pendingCrossChainVerifications),
             logFile: logger.getCurrentLogFile()
         };
         
@@ -1434,7 +1744,7 @@ setInterval(pollAssetEvents, 15000);
 setInterval(pollPaymentEvents, 15000);
 setInterval(checkAndHandleExpiredTrades, 30000);
 
-const PORT = process.env.SERVER_PORT || 1202;
+const PORT = process.env.SERVER_PORT;
 
 // 優雅關閉處理
 function gracefulShutdown(signal) {
